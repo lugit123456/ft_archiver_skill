@@ -11,41 +11,12 @@
     const THEME_KEY = 'auto_paper_frontend_theme';
     const PUBLICATION_STORAGE_KEY = 'auto_paper_frontend_publication';
     const PUBLICATION_NAMES = {
+        CX: '财新周刊',
         WSJ: 'The Wall Street Journal',
         FT: 'Financial Times',
         TE: 'The Economist',
     };
-    const PUBLICATION_ORDER = ['WSJ', 'FT', 'TE'];
-    const PRINT_SECTION_DISPLAY_NAMES = Object.freeze({
-        'PAGE ONE': '头版',
-        'U.S. NEWS': 'U.S. News',
-        'WORLD NEWS': 'World News',
-        'BUSINESS & FINANCE': 'Business & Finance',
-        'BUSINESS INSIGHT': 'Business Insight',
-        'MONEY & INVESTING': 'Money & Investing',
-        'THE WORLD THIS WEEK': 'The World This Week',
-        'LIFE & ARTS': 'Life & Arts',
-        'ARTS & CULTURE': 'Arts & Culture',
-        'SCIENCE & TECHNOLOGY': 'Science & Technology',
-        'TECHNOLOGY': 'Technology',
-        'NATIONAL': 'National',
-        'OPINION': 'Opinion',
-        'SPORTS': 'Sports',
-        'EXCHANGE': 'Exchange',
-    });
-    const WHATS_NEWS_GROUP_NAMES = Object.freeze({
-        'BUSINESS & FINANCE': '商业与金融',
-        'WORLDWIDE': '全球要闻',
-        'BRIEFING': '简报',
-    });
-    const WHATS_NEWS_STOP_WORDS = new Set([
-        'about', 'after', 'again', 'against', 'also', 'among', 'and', 'are',
-        'because', 'been', 'before', 'being', 'between', 'but', 'can', 'could',
-        'did', 'does', 'for', 'from', 'had', 'has', 'have', 'her', 'his',
-        'into', 'its', 'more', 'new', 'not', 'over', 'said', 'that', 'the',
-        'their', 'them', 'they', 'this', 'through', 'under', 'was', 'were',
-        'will', 'with', 'would', 'year', 'years',
-    ]);
+    const PUBLICATION_ORDER = ['CX', 'WSJ', 'FT', 'TE'];
 
     if (typeof marked !== 'undefined' && marked.setOptions) {
         marked.setOptions({
@@ -87,16 +58,9 @@
         currentPublication: null,
         currentIssueId: null,
         currentArticleId: null,
-        currentIssueView: null,
-        currentPageLabel: null,
         currentIssue: null,
         currentArticles: [],
-        issueSearchIssueId: null,
-        issueSearchQuery: '',
-        issueLoadToken: 0,
     };
-    let viewTransitionToken = 0;
-    let viewTransitionTimer = null;
 
     const lightboxState = { images: [], idx: 0 };
     const glossaryUiState = {
@@ -104,10 +68,6 @@
         pinned: false,
         hideTimer: null,
         returnFocus: null,
-    };
-    const tocUiState = {
-        returnFocus: null,
-        hideTimer: null,
     };
 
     function escapeHtml(value) {
@@ -122,10 +82,6 @@
 
     function stripHtml(html) {
         return String(html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    }
-
-    function displayFilename(filename) {
-        return String(filename || '').replace(/^\s*\[[^\]]+\]\s*/, '');
     }
 
     function formatDate(dateStr) {
@@ -168,15 +124,10 @@
         return parts.join('/');
     }
 
-    function databaseRoot(issue) {
-        const root = String(issue?.database_root || DATABASE_ROOT);
-        return root.endsWith('/') ? root : root + '/';
-    }
-
     function issueBasePath(issue) {
         const dbPath = issue && issue.database_path ? issue.database_path : '';
         const dir = dirname(dbPath);
-        return databaseRoot(issue) + (dir ? dir + '/' : '');
+        return DATABASE_ROOT + (dir ? dir + '/' : '');
     }
 
     function resolveIssueAsset(issue, path) {
@@ -212,31 +163,12 @@
         const raw = window.location.hash.replace(/^#\/?/, '');
         const parts = raw.split('/').filter(Boolean);
         if (parts[0] === 'publication' && parts[1]) {
-            return { publication: decodeURIComponent(parts[1]), issueId: null, view: null, articleId: null, pageLabel: null };
+            return { publication: decodeURIComponent(parts[1]), issueId: null, articleId: null };
         }
         if (parts[0] === 'issue' && parts[1]) {
-            const issueId = decodeURIComponent(parts[1]);
-            if (parts[2] === 'frontpage') {
-                return { publication: null, issueId, view: 'frontpage', articleId: null, pageLabel: null };
-            }
-            if (parts[2] === 'page' && parts[3]) {
-                return {
-                    publication: null,
-                    issueId,
-                    view: 'page',
-                    articleId: null,
-                    pageLabel: decodeURIComponent(parts.slice(3).join('/')),
-                };
-            }
-            return {
-                publication: null,
-                issueId,
-                view: parts[2] ? 'article' : null,
-                articleId: decodeURIComponent(parts[2] || '') || null,
-                pageLabel: null,
-            };
+            return { publication: null, issueId: decodeURIComponent(parts[1]), articleId: decodeURIComponent(parts[2] || '') || null };
         }
-        return { publication: null, issueId: null, view: null, articleId: null, pageLabel: null };
+        return { publication: null, issueId: null, articleId: null };
     }
 
     function navigate(path, replace) {
@@ -250,21 +182,12 @@
     }
 
     function switchView(viewId, onShown) {
+        const current = document.querySelector('.view.is-active');
         const next = document.getElementById(viewId);
         if (!next) return;
-        const transitionToken = ++viewTransitionToken;
-        if (viewTransitionTimer !== null) {
-            clearTimeout(viewTransitionTimer);
-            viewTransitionTimer = null;
-        }
-        document.querySelectorAll('.view.is-leaving').forEach(view => view.classList.remove('is-leaving'));
-
-        const current = document.querySelector('.view.is-active');
         if (current && current !== next) {
             current.classList.add('is-leaving');
-            viewTransitionTimer = setTimeout(() => {
-                if (transitionToken !== viewTransitionToken) return;
-                viewTransitionTimer = null;
+            setTimeout(() => {
                 current.classList.remove('is-active', 'is-leaving');
                 next.classList.add('is-active');
                 if (typeof onShown === 'function') onShown();
@@ -297,6 +220,10 @@
             publicationName(issue.publication_type),
             issue.publication_date,
             issue.original_filename,
+            issue.issue_title,
+            issue.issue_number,
+            issue.year_issue,
+            issue.source_line,
             (issue.sections || []).join(' '),
             (issue.titles || []).join(' '),
         ].join(' ').toLowerCase();
@@ -308,10 +235,9 @@
         const publicationLabel = publicationName(publication);
         const articleCount = issue.article_count || 0;
         const initials = publication.slice(0, 3).toUpperCase();
-        const filename = displayFilename(issue.original_filename || issue.id || '');
+        const issueTitle = issue.issue_title || (issue.issue_number ? `《财新周刊》总第${issue.issue_number}期` : publicationLabel);
+        const issuePeriod = issue.year_issue || issue.original_filename || issue.id || '';
         const cover = resolveIssueAsset(issue, issue.cover_image || '');
-        const showWeekend = Object.prototype.hasOwnProperty.call(issue, 'is_weekend')
-            && issue.is_weekend === true;
         return `
             <article class="cover-card" data-issue-id="${escapeHtml(issue.id)}"
                      data-search="${escapeHtml(issueSearchText(issue))}">
@@ -320,12 +246,9 @@
                     <div class="cover-image-fallback" ${cover ? 'hidden' : ''}>${escapeHtml(initials)}</div>
                 </div>
                 <div class="cover-body">
-                    <div class="cover-date-row">
-                        <div class="cover-date">${escapeHtml(dateLabel)}</div>
-                        ${showWeekend ? '<span class="cover-weekend-label">周末版</span>' : ''}
-                    </div>
-                    <div class="cover-id">${escapeHtml(publicationLabel)}</div>
-                    <div class="cover-file">${escapeHtml(filename)}</div>
+                    <div class="cover-date">出版日期 · ${escapeHtml(dateLabel)}</div>
+                    <div class="cover-id">${escapeHtml(issueTitle)}</div>
+                    <div class="cover-file">${escapeHtml(issuePeriod)}</div>
                     <div class="cover-meta">
                         <span class="cover-meta-count">${articleCount} 篇文章</span>
                         <span class="cover-meta-arrow">→</span>
@@ -402,15 +325,12 @@
             }).join('');
             tabs.querySelectorAll('.publication-tab').forEach(tab => {
                 tab.addEventListener('click', () => {
-                    const publication = tab.dataset.publication || null;
-                    
-                    state.currentPublication = publication;
+                    state.currentPublication = tab.dataset.publication || null;
                     savePublication(state.currentPublication);
                     renderWall();
                 });
             });
         }
-        
         setText('wall-publication-title', publicationName(selectedPublication));
         setText('wall-publication-meta', hasTypeParam ? `${issues.length} 期 · ${articleCount} 篇文章` : `${issues.length} 期 · ${articleCount} 篇文章`);
         grid.innerHTML = issues.map(renderCoverCard).join('');
@@ -478,7 +398,7 @@
                 || window.PAPER_FRONTEND_VERSION
                 || '1';
             const separator = String(indexItem.database_path).includes('?') ? '&' : '?';
-            script.src = databaseRoot(indexItem) + indexItem.database_path
+            script.src = DATABASE_ROOT + indexItem.database_path
                 + separator + 'v=' + encodeURIComponent(databaseVersion);
             script.onload = () => {
                 const db = window.paper_databases && window.paper_databases[issueId];
@@ -511,188 +431,18 @@
 
     function normalizeArticle(article, issue) {
         const id = article.id || `${issue.id}_article_${article.page || 0}_${article.page_article_index || 0}`;
-        const category = article.category || article.section || 'General';
+        const section = article.category || article.section || 'General';
         return {
             ...article,
             id,
-            category,
-            section: category,
-            print_page_label: normalizedLabel(article.print_page_label),
-            print_section: normalizedLabel(article.print_section),
-            source_pages: uniquePositiveNumbers(article.source_pages),
+            section,
             title: article.title || 'Untitled',
             title_zh: article.title_zh || '',
             images: Array.isArray(article.images) ? article.images : [],
+            image_placements: Array.isArray(article.image_placements) ? article.image_placements : [],
             image_insights: Array.isArray(article.image_insights) ? article.image_insights : [],
             term_annotations: Array.isArray(article.term_annotations) ? article.term_annotations : [],
             paragraphs: normalizeParagraphs(article, id),
-        };
-    }
-
-    function normalizedLabel(value) {
-        if (value === null || value === undefined) return null;
-        const normalized = String(value).trim();
-        return normalized || null;
-    }
-
-    function uniqueStrings(values) {
-        const seen = new Set();
-        return (values || []).map(value => String(value || '').trim()).filter(value => {
-            if (!value || seen.has(value)) return false;
-            seen.add(value);
-            return true;
-        });
-    }
-
-    function uniquePositiveNumbers(values) {
-        const seen = new Set();
-        return (Array.isArray(values) ? values : []).map(Number).filter(value => {
-            if (!Number.isInteger(value) || value <= 0 || seen.has(value)) return false;
-            seen.add(value);
-            return true;
-        });
-    }
-
-    function compareArticlePosition(left, right) {
-        return Number(left.page_article_index || 0) - Number(right.page_article_index || 0)
-            || String(left.id).localeCompare(String(right.id));
-    }
-
-    function usesCategoryArticleToc(issue) {
-        return String(issue && issue.publication_type || '').toUpperCase() === 'TE';
-    }
-
-    function normalizeIssueLayout(issue) {
-        if (usesCategoryArticleToc(issue)) {
-            issue.pages = [];
-            issue.front_page = null;
-            return issue;
-        }
-
-        const articleById = new Map(issue.articles.map(article => [article.id, article]));
-        let pages = (Array.isArray(issue.pages) ? issue.pages : []).map((page, index) => ({
-            ...page,
-            pdf_page: Number(page.pdf_page || page.page || 0) || null,
-            page_order: Number(page.page_order || 0) || index + 1,
-            print_page_label: normalizedLabel(page.print_page_label),
-            print_section: normalizedLabel(page.print_section),
-            article_ids: uniqueStrings(page.article_ids).filter(id => articleById.has(id)),
-        })).sort((left, right) => left.page_order - right.page_order || (left.pdf_page || 0) - (right.pdf_page || 0));
-
-        if (!pages.length) {
-            const grouped = new Map();
-            issue.articles.forEach(article => {
-                const pdfPage = Number(article.page || 0) || null;
-                const label = normalizedLabel(article.print_page_label);
-                const section = normalizedLabel(article.print_section);
-                const key = `${label || ''}\u0000${section || ''}\u0000${pdfPage || ''}`;
-                if (!grouped.has(key)) {
-                    grouped.set(key, {
-                        pdf_page: pdfPage,
-                        page_order: grouped.size + 1,
-                        print_page_label: label,
-                        print_section: section,
-                        article_ids: [],
-                        is_fallback: true,
-                    });
-                }
-                grouped.get(key).article_ids.push(article.id);
-            });
-            pages = Array.from(grouped.values());
-        }
-
-        issue.articles.forEach(article => {
-            const sourcePages = uniquePositiveNumbers([
-                ...(article.source_pages || []),
-                article.page,
-            ]);
-            sourcePages.forEach(pdfPage => {
-                const matchingPage = pages.find(page => page.pdf_page === pdfPage);
-                if (matchingPage) matchingPage.article_ids.push(article.id);
-            });
-        });
-
-        const referenced = new Set(pages.flatMap(page => page.article_ids));
-        issue.articles.forEach(article => {
-            if (referenced.has(article.id)) return;
-            const matchingPage = pages.find(page => (
-                article.print_page_label && page.print_page_label
-                && samePageLabel(article.print_page_label, page.print_page_label)
-            )) || pages.find(page => Number(article.page || 0) && Number(article.page) === page.pdf_page);
-            if (matchingPage) {
-                matchingPage.article_ids.push(article.id);
-                referenced.add(article.id);
-            }
-        });
-
-        const unmatchedArticleIds = issue.articles
-            .filter(article => !referenced.has(article.id))
-            .map(article => article.id);
-        if (unmatchedArticleIds.length) {
-            pages.push({
-                pdf_page: null,
-                page_order: pages.reduce((max, page) => Math.max(max, page.page_order || 0), 0) + 1,
-                print_page_label: null,
-                print_section: null,
-                article_ids: unmatchedArticleIds,
-                is_fallback: true,
-            });
-            unmatchedArticleIds.forEach(id => referenced.add(id));
-        }
-
-        pages.forEach(page => {
-            page.article_ids = uniqueStrings(page.article_ids).sort((leftId, rightId) => (
-                compareArticlePosition(articleById.get(leftId), articleById.get(rightId))
-            ));
-            page.article_ids.forEach(id => {
-                const article = articleById.get(id);
-                if (!article) return;
-                if (!article.print_page_label) article.print_page_label = page.print_page_label;
-                if (!article.print_section) article.print_section = page.print_section;
-            });
-        });
-
-        const ordered = [];
-        const orderedIds = new Set();
-        pages.forEach(page => page.article_ids.forEach(id => {
-            if (orderedIds.has(id) || !articleById.has(id)) return;
-            orderedIds.add(id);
-            ordered.push(articleById.get(id));
-        }));
-        issue.articles.slice().sort((left, right) => (
-            Number(left.page || 0) - Number(right.page || 0) || compareArticlePosition(left, right)
-        )).forEach(article => {
-            if (!orderedIds.has(article.id)) ordered.push(article);
-        });
-
-        issue.pages = pages;
-        issue.articles = ordered;
-        issue.front_page = normalizeFrontPage(issue.front_page);
-        return issue;
-    }
-
-    function normalizeFrontPage(frontPage) {
-        if (!frontPage || typeof frontPage !== 'object' || Array.isArray(frontPage)) return null;
-        const whatsNews = frontPage.whats_news && typeof frontPage.whats_news === 'object'
-            ? frontPage.whats_news : {};
-        const groups = (Array.isArray(whatsNews.groups) ? whatsNews.groups : []).map(group => ({
-            name: String(group.name || '').trim() || 'What’s News',
-            items: (Array.isArray(group.items) ? group.items : []).map(item => ({
-                text: String(item.text || item.title || '').trim(),
-                title: String(item.title || '').trim(),
-                title_zh: String(item.title_zh || '').trim(),
-                target_article_id: String(item.target_article_id || '').trim() || null,
-                target_print_page_label: String(item.target_print_page_label || '').trim() || null,
-            })).filter(item => item.text),
-        })).filter(group => group.items.length);
-        if (!groups.length) return null;
-        return {
-            ...frontPage,
-            pdf_page: Number(frontPage.pdf_page || frontPage.page || 0) || null,
-            print_page_label: normalizedLabel(frontPage.print_page_label),
-            print_section: normalizedLabel(frontPage.print_section),
-            directory_name: String(frontPage.directory_name || '').trim() || null,
-            whats_news: { ...whatsNews, groups },
         };
     }
 
@@ -718,261 +468,71 @@
             }));
     }
 
-    function pageLabel(page) {
-        return normalizedLabel(page && page.print_page_label)
-            || (Number(page && page.pdf_page) ? `PDF ${Number(page.pdf_page)}` : 'PDF 页码未知');
-    }
-
-    function displayPrintSection(value) {
-        const raw = normalizedLabel(value);
-        if (!raw) return null;
-        const key = raw.replace(/\s+/g, ' ').toLocaleUpperCase('en-US');
-        if (PRINT_SECTION_DISPLAY_NAMES[key]) return PRINT_SECTION_DISPLAY_NAMES[key];
-        if (raw !== key || !/[A-Z]/.test(raw)) return raw;
-        const smallWords = new Set(['a', 'an', 'and', 'at', 'by', 'for', 'in', 'of', 'on', 'or', 'the', 'to', 'with']);
-        const acronyms = new Set(['AI', 'CEO', 'CFO', 'EU', 'UK', 'U.K.']);
-        return key.toLocaleLowerCase('en-US').split(' ').map((word, index) => {
-            const upper = word.toLocaleUpperCase('en-US');
-            if (acronyms.has(upper)) return upper;
-            if (index > 0 && smallWords.has(word)) return word;
-            return word.replace(/[a-z]/, letter => letter.toLocaleUpperCase('en-US'));
-        }).join(' ');
-    }
-
-    function whatsNewsTokens(value) {
-        const normalized = String(value || '')
-            .toLocaleLowerCase('en-US')
-            .replace(/([a-z])-\s+([a-z])/g, '$1$2');
-        return new Set((normalized.match(/[a-z0-9]+/g) || []).map(token => {
-            if (token.length > 4 && token.endsWith('ies')) return `${token.slice(0, -3)}y`;
-            if (token.length > 4 && token.endsWith('s') && !token.endsWith('ss')) return token.slice(0, -1);
-            return token;
-        }).filter(token => token.length >= 3 && !WHATS_NEWS_STOP_WORDS.has(token)));
-    }
-
-    function whatsNewsMatchScore(item, article) {
-        const queryTokens = whatsNewsTokens(item.text);
-        if (!queryTokens.size) return 0;
-        const titleTokens = whatsNewsTokens(article.title);
-        const bodyTokens = whatsNewsTokens(
-            article.content_markdown || article.content_raw
-            || (article.paragraphs || []).map(paragraph => paragraph.en_text || '').join(' ')
-        );
-        let titleOverlap = 0;
-        let bodyOverlap = 0;
-        queryTokens.forEach(token => {
-            if (titleTokens.has(token)) titleOverlap += 1;
-            if (bodyTokens.has(token)) bodyOverlap += 1;
+    function renderArticleList(articles) {
+        const groups = new Map();
+        articles.forEach(article => {
+            const section = article.section || 'General';
+            if (!groups.has(section)) groups.set(section, []);
+            groups.get(section).push(article);
         });
-        if (!titleOverlap && bodyOverlap < 3) return 0;
-        return titleOverlap * 7 + bodyOverlap;
-    }
 
-    function resolveWhatsNewsArticle(issue, item, usedArticleIds) {
-        const explicit = item.target_article_id
-            ? issue.articles.find(article => article.id === item.target_article_id) : null;
-        if (explicit) return explicit;
-        const targetPage = item.target_print_page_label
-            ? findPrintPage(issue, item.target_print_page_label) : null;
-        const candidates = articlesForPage(issue, targetPage)
-            .filter(article => !usedArticleIds.has(article.id));
-        if (candidates.length === 1) return candidates[0];
-        const scored = candidates.map(article => ({
-            article,
-            score: whatsNewsMatchScore(item, article),
-        })).sort((left, right) => right.score - left.score);
-        return scored.length && scored[0].score >= 3 ? scored[0].article : null;
-    }
-
-    function renderWhatsNewsGroupHeading(name) {
-        const english = String(name || 'What’s News').trim() || 'What’s News';
-        const chinese = WHATS_NEWS_GROUP_NAMES[english.toLocaleUpperCase('en-US')];
-        return chinese
-            ? `<h2><span>${escapeHtml(chinese)}</span><small>${escapeHtml(english)}</small></h2>`
-            : `<h2>${escapeHtml(english)}</h2>`;
-    }
-
-    function renderWhatsNewsCopy(item, targetArticle) {
-        const title = item.title || (targetArticle && targetArticle.title) || '';
-        const titleZh = item.title_zh || (targetArticle && targetArticle.title_zh) || '';
-        if (!title) {
-            return `<span class="whats-news-summary is-primary">${escapeHtml(item.text)}</span>`;
-        }
-        return `<span class="whats-news-copy">
-            <strong>${escapeHtml(titleZh || title)}</strong>
-            ${titleZh ? `<em>${escapeHtml(title)}</em>` : ''}
-            ${item.text !== title ? `<span class="whats-news-summary">${escapeHtml(item.text)}</span>` : ''}
-        </span>`;
-    }
-
-    function pageHeading(page) {
-        return `${pageLabel(page)} · ${displayPrintSection(page && page.print_section) || '栏目未识别'}`;
-    }
-
-    function renderArticleItem(article, primaryMembership) {
-        const active = primaryMembership && state.currentIssueView === 'article'
-            && article.id === state.currentArticleId;
-        const searchText = [
-            article.title_zh,
-            article.title,
-            article.print_page_label,
-            article.print_section,
-            article.category,
-            article.summary_md,
-            article.content_markdown,
-        ].join(' ');
-        return `
-            <button class="article-item${active ? ' is-active' : ''}" data-article-id="${escapeHtml(article.id)}"
-                    ${primaryMembership ? 'data-primary-membership="true"' : ''}
-                    ${active ? 'aria-current="true"' : ''}
-                    data-search-title="${escapeHtml(searchText.toLowerCase())}">
-                <div class="article-item-title-zh">${escapeHtml(article.title_zh || article.title)}</div>
-                <div class="article-item-title-en">${escapeHtml(article.title)}</div>
-                <span class="article-match-badge" data-match-info></span>
-            </button>
-        `;
-    }
-
-    function isFrontPage(issue, page) {
-        if (!issue.front_page || !page) return false;
-        const frontLabel = normalizedLabel(issue.front_page.print_page_label);
-        if (frontLabel && samePageLabel(frontLabel, page.print_page_label)) return true;
-        const frontPdfPage = Number(issue.front_page.pdf_page || 0);
-        return !frontLabel && frontPdfPage > 0 && frontPdfPage === Number(page.pdf_page || 0);
-    }
-
-    function primaryPageForArticle(issue, article) {
-        if (!issue || !article) return null;
-        const pages = Array.isArray(issue.pages) ? issue.pages : [];
-        const printPageLabel = normalizedLabel(article.print_page_label);
-        if (printPageLabel) {
-            const labelMatch = pages.find(page => samePageLabel(page.print_page_label, printPageLabel));
-            if (labelMatch) return labelMatch;
-        }
-        const pdfPage = Number(article.pdf_page || article.page || 0);
-        if (pdfPage > 0) {
-            const pdfMatch = pages.find(page => Number(page.pdf_page || 0) === pdfPage);
-            if (pdfMatch) return pdfMatch;
-        }
-        return pages.find(page => (page.article_ids || []).includes(article.id)) || null;
-    }
-
-    function renderArticleList(issue) {
-        if (usesCategoryArticleToc(issue)) {
-            const groups = new Map();
-            issue.articles.forEach(article => {
-                const category = String(article.category || 'General').trim() || 'General';
-                if (!groups.has(category)) groups.set(category, []);
-                groups.get(category).push(article);
-            });
-            return Array.from(groups.entries()).map(([category, articles]) => {
-                const active = state.currentIssueView === 'article'
-                    && articles.some(article => article.id === state.currentArticleId);
-                return `<div class="article-group article-group-category${active ? ' is-active' : ''}"
-                            data-category="${escapeHtml(category)}">
-                    <div class="article-group-header article-category-header${active ? ' is-active' : ''}"
-                         role="heading" aria-level="3"
-                         data-search-title="${escapeHtml(category.toLowerCase())}">
-                        <span>${escapeHtml(category)}</span>
-                        <span class="article-group-count">${articles.length}</span>
-                    </div>
-                    ${articles.map(article => renderArticleItem(article, true)).join('')}
-                </div>`;
-            }).join('');
-        }
-
-        const primaryPages = new Map(issue.articles.map(article => (
-            [article.id, primaryPageForArticle(issue, article)]
-        )));
-        return issue.pages.map(page => {
-            const seenOnPage = new Set();
-            const items = page.article_ids.map(id => issue.articles.find(article => article.id === id))
-                .filter(article => {
-                    if (!article || seenOnPage.has(article.id)) return false;
-                    seenOnPage.add(article.id);
-                    return true;
-                });
-            const frontPage = isFrontPage(issue, page);
-            const activeArticle = state.currentIssueView === 'article'
-                ? items.find(article => (
-                    article.id === state.currentArticleId && primaryPages.get(article.id) === page
-                ))
-                : null;
-            const active = (frontPage && state.currentIssueView === 'frontpage')
-                || (state.currentIssueView === 'page' && samePageLabel(state.currentPageLabel, pageLabel(page)))
-                || !!activeArticle;
-            return `
-            <div class="article-group${active ? ' is-active' : ''}" data-page-label="${escapeHtml(pageLabel(page))}">
-                <button class="article-group-header${active ? ' is-active' : ''}"
-                        ${active ? 'aria-current="page"' : ''}
-                        type="button" ${frontPage ? 'data-frontpage' : `data-page-link="${escapeHtml(pageLabel(page))}"`}
-                        data-search-title="${escapeHtml(pageHeading(page).toLowerCase())}">
-                    <span>${escapeHtml(pageHeading(page))}</span>
-                    <span class="article-group-count">${items.length}</span>
-                </button>
-                ${items.map(article => renderArticleItem(
-                    article,
-                    primaryPages.get(article.id) === page,
-                )).join('')}
+        return Array.from(groups.entries()).map(([section, items]) => `
+            <div class="article-group">
+                <div class="article-group-header">${escapeHtml(section)}</div>
+                ${items.map(article => {
+                    const isChineseOnly = article.publication_type === 'CX'
+                        || (article.title_zh && article.title_zh === article.title);
+                    const searchText = [
+                        article.title_zh,
+                        article.title,
+                        article.section,
+                        article.summary_md,
+                        article.content_markdown,
+                    ].join(' ');
+                    return `
+                        <button class="article-item" data-article-id="${escapeHtml(article.id)}"
+                                data-search-title="${escapeHtml(searchText.toLowerCase())}">
+                            <div class="article-item-title-zh">${escapeHtml(article.title_zh || article.title)}</div>
+                            ${isChineseOnly ? '' : `<div class="article-item-title-en">${escapeHtml(article.title)}</div>`}
+                            <span class="article-match-badge" data-match-info></span>
+                        </button>
+                    `;
+                }).join('')}
             </div>
-        `;
-        }).join('');
+        `).join('');
     }
 
-    function samePageLabel(left, right) {
-        const normalizedLeft = normalizedLabel(left);
-        const normalizedRight = normalizedLabel(right);
-        return !!normalizedLeft && !!normalizedRight
-            && normalizedLeft.toLocaleUpperCase() === normalizedRight.toLocaleUpperCase();
-    }
-
-    function renderIssue(issueId, routeState) {
+    function renderIssue(issueId, articleId) {
         const indexItem = INDEX.find(item => item.id === issueId);
         if (!indexItem) {
             navigate('/');
             return;
         }
 
-        activateIssueSearch(issueId);
-
-        const loadToken = ++state.issueLoadToken;
-        const requestedHash = window.location.hash;
-        const isCurrentLoad = () => (
-            loadToken === state.issueLoadToken && window.location.hash === requestedHash
-        );
-        stopTts();
-        showArticleReader(true);
-
         setText('issue-id-label', publicationName(indexItem.publication_type || indexItem.id));
         setText('issue-date-label', formatDate(indexItem.publication_date));
         setText('article-count', '加载中');
         setText('current-section', 'Loading');
-        setText('current-category', '');
         setText('current-title-zh', '正在加载数据库...');
-        setText('current-title-en', displayFilename(indexItem.original_filename));
+        setText('current-title-en', indexItem.original_filename || '');
         setHtml('summary-content', '<p>正在读取本期 database.js。</p>');
         setHtml('bilingual-grid', '');
 
         loadIssueDatabase(issueId)
             .then(db => {
-                if (!isCurrentLoad()) return;
                 const issue = { ...indexItem, ...db };
                 issue.database_path = indexItem.database_path || issue.database_path;
-                issue.database_root = indexItem.database_root || issue.database_root || DATABASE_ROOT;
                 issue.glossary = issue.glossary && typeof issue.glossary === 'object'
                     ? issue.glossary
                     : {};
                 issue.articles = (issue.articles || []).map(article => normalizeArticle(article, issue));
-                normalizeIssueLayout(issue);
                 state.currentIssueId = issueId;
                 state.currentIssue = issue;
                 state.currentArticles = issue.articles;
-                renderLoadedIssue(issue, routeState || {});
+                renderLoadedIssue(issue, articleId);
             })
             .catch(error => {
-                if (!isCurrentLoad()) return;
                 console.error(error);
-                showArticleReader(true);
                 setText('current-section', 'Error');
                 setText('current-title-zh', '数据库加载失败');
                 setText('current-title-en', error.message);
@@ -980,51 +540,35 @@
             });
     }
 
-    function renderLoadedIssue(issue, routeState) {
+    function renderLoadedIssue(issue, articleId) {
         const articleCount = issue.articles.length;
         setText('issue-id-label', publicationName(issue.publication_type || issue.id));
-        setText('issue-date-label', `${formatDate(issue.publication_date)} · ${displayFilename(issue.original_filename)}`);
+        const issueLabel = [issue.issue_title, issue.year_issue, formatDate(issue.publication_date)].filter(Boolean).join(' · ');
+        setText('issue-date-label', issueLabel || issue.original_filename || '');
         setText('article-count', `${articleCount} 篇`);
         setText('article-bottom-toc-count', `本期共 ${articleCount} 篇文章`);
 
-        const requestedView = routeState.view;
-        if (!requestedView) {
-            const defaultPath = issue.front_page
-                ? `/issue/${encodeURIComponent(issue.id)}/frontpage`
-                : issue.articles[0]
-                    ? `/issue/${encodeURIComponent(issue.id)}/${encodeURIComponent(issue.articles[0].id)}`
-                    : null;
-            if (defaultPath) {
-                navigate(defaultPath, true);
-                return;
-            }
-        }
+        const list = document.getElementById('article-list');
+        list.innerHTML = renderArticleList(issue.articles);
+        list.querySelectorAll('.article-item').forEach(item => {
+            item.addEventListener('click', () => {
+                if (item.dataset.articleId) {
+                    navigate(`/issue/${encodeURIComponent(issue.id)}/${encodeURIComponent(item.dataset.articleId)}`);
+                }
+            });
+        });
 
-        state.currentIssueView = requestedView || 'page';
-        state.currentPageLabel = routeState.pageLabel || null;
-        state.currentArticleId = routeState.articleId || null;
-        renderIssueNavigation(issue);
+        let target = articleId ? issue.articles.find(article => article.id === articleId) : null;
+        if (!target && issue.articles.length) target = issue.articles[0];
 
-        if (requestedView === 'frontpage') {
-            issue.front_page ? renderFrontPage(issue) : renderUnavailableFrontPage();
-        } else if (requestedView === 'page') {
-            renderPrintPage(issue, routeState.pageLabel);
-        } else {
-            let target = routeState.articleId
-                ? issue.articles.find(article => article.id === routeState.articleId)
-                : null;
-            if (!target && issue.articles.length) target = issue.articles[0];
-            if (target) {
-                state.currentIssueView = 'article';
+        if (target) {
             state.currentArticleId = target.id;
             renderArticle(target, issue);
-                if (routeState.articleId && routeState.articleId !== target.id) {
+            if (!articleId) {
                 navigate(`/issue/${encodeURIComponent(issue.id)}/${encodeURIComponent(target.id)}`, true);
-                    return;
-                }
-            } else {
-                renderNoArticle(issue);
             }
+        } else {
+            renderNoArticle(issue);
         }
 
         highlightCurrentArticle();
@@ -1033,27 +577,18 @@
     }
 
     function renderNoArticle(issue) {
-        showArticleReader(true);
         setText('current-section', publicationName(issue.publication_type || 'General'));
-        setText('current-category', '');
         setText('current-title-zh', '本期暂无文章');
-        setText('current-title-en', displayFilename(issue.original_filename));
+        setText('current-title-en', issue.original_filename || '');
         setHtml('summary-content', '<p>当前 database.js 中没有可展示文章。</p>');
         setHtml('bilingual-grid', '<p class="bilingual-empty">暂无正文。</p>');
     }
 
     function renderArticle(article, issue) {
         closeGlossaryUi(false);
-        showArticleReader(true);
-        const printHeading = usesCategoryArticleToc(issue)
-            ? ''
-            : [article.print_page_label, displayPrintSection(article.print_section)].filter(Boolean).join(' · ');
-        setText('current-section', printHeading || (
-            usesCategoryArticleToc(issue) ? publicationName(issue.publication_type) : '版面信息未知'
-        ));
-        setText('current-category', article.category || '');
+        setText('current-section', article.section || 'General');
         setText('current-title-zh', article.title_zh || article.title || '');
-        setText('current-title-en', article.title || '');
+        setText('current-title-en', issue.publication_type === 'CX' ? '' : (article.title || ''));
 
         const summary = article.summary_md || buildLocalSummary(article);
         setHtml('summary-content', renderMarkdown(summary, issue));
@@ -1062,147 +597,18 @@
         updateArticleNavigation();
     }
 
-    function showArticleReader(show) {
-        document.getElementById('article-reader').hidden = !show;
-        document.getElementById('issue-overview').hidden = show;
-    }
-
-    function renderIssueNavigation(issue) {
-        const list = document.getElementById('article-list');
-        list.innerHTML = renderArticleList(issue);
-        bindIssueLinks(list, issue, false);
-    }
-
-    function bindIssueLinks(root, issue, closeSheet) {
-        root.querySelectorAll('[data-frontpage]').forEach(item => {
-            item.addEventListener('click', () => {
-                if (closeSheet) closeTocSheet();
-                navigate(`/issue/${encodeURIComponent(issue.id)}/frontpage`);
-            });
-        });
-        root.querySelectorAll('[data-page-link]').forEach(item => {
-            item.addEventListener('click', () => {
-                if (closeSheet) closeTocSheet();
-                navigate(`/issue/${encodeURIComponent(issue.id)}/page/${encodeURIComponent(item.dataset.pageLink)}`);
-            });
-        });
-        root.querySelectorAll('[data-article-id]').forEach(item => {
-            item.addEventListener('click', () => {
-                if (closeSheet) closeTocSheet();
-                if (item.dataset.articleId) {
-                    navigate(`/issue/${encodeURIComponent(issue.id)}/${encodeURIComponent(item.dataset.articleId)}`);
-                }
-            });
-        });
-    }
-
-    function findPrintPage(issue, label) {
-        const direct = issue.pages.find(page => samePageLabel(pageLabel(page), label)) || null;
-        if (direct) return direct;
-        const numericLabel = String(label || '').trim();
-        if (
-            String(issue.publication_type || '').toUpperCase() === 'FT'
-            && /^\d+$/.test(numericLabel)
-        ) {
-            return issue.pages.find(page => Number(page.pdf_page || 0) === Number(numericLabel)) || null;
-        }
-        return null;
-    }
-
-    function articlesForPage(issue, page) {
-        if (!page) return [];
-        const byId = new Map(issue.articles.map(article => [article.id, article]));
-        return uniqueStrings(page.article_ids).map(id => byId.get(id)).filter(Boolean);
-    }
-
-    function renderOverviewArticleList(articles, emptyText) {
-        if (!articles.length) return `<p class="issue-overview-empty">${escapeHtml(emptyText)}</p>`;
-        return `<div class="issue-overview-articles">${articles.map(article => `
-            <button class="issue-overview-article" type="button" data-article-id="${escapeHtml(article.id)}">
-                <strong>${escapeHtml(article.title_zh || article.title)}</strong>
-                ${article.title_zh ? `<span>${escapeHtml(article.title)}</span>` : ''}
-            </button>`).join('')}</div>`;
-    }
-
-    function renderFrontPage(issue) {
-        stopTts();
-        showArticleReader(false);
-        state.currentArticleId = null;
-        const overview = document.getElementById('issue-overview');
-        const label = issue.front_page.print_page_label || '';
-        const page = issue.pages.find(candidate => isFrontPage(issue, candidate)) || null;
-        const groups = issue.front_page.whats_news.groups;
-        const directoryName = issue.front_page.directory_name
-            || (String(issue.publication_type || '').toUpperCase() === 'FT' ? 'Briefing' : 'What’s News');
-        const usedWhatsNewsArticleIds = new Set();
-        overview.innerHTML = `
-            <header class="issue-overview-header">
-                <span class="issue-overview-kicker">${escapeHtml([label, displayPrintSection(issue.front_page.print_section)].filter(Boolean).join(' · '))}</span>
-                <h1>今日头版</h1><p>${escapeHtml(directoryName)}</p>
-            </header>
-            <section class="frontpage-leads">
-                <h2>${escapeHtml(label || '头版')}文章</h2>
-                ${renderOverviewArticleList(articlesForPage(issue, page), '当前数据中没有可用的头版文章。')}
-            </section>
-            <section class="whats-news" aria-label="${escapeHtml(directoryName)}">
-                ${groups.map(group => `<div class="whats-news-group">${renderWhatsNewsGroupHeading(group.name)}<ul>${group.items.map(item => {
-                    const targetArticle = resolveWhatsNewsArticle(issue, item, usedWhatsNewsArticleIds);
-                    if (targetArticle) usedWhatsNewsArticleIds.add(targetArticle.id);
-                    const targetPage = item.target_print_page_label
-                        ? findPrintPage(issue, item.target_print_page_label) : null;
-                    const available = !!(targetArticle || targetPage);
-                    const targetLabel = targetArticle
-                        ? (targetArticle.print_page_label || '阅读文章')
-                        : targetPage ? pageLabel(targetPage) : (item.target_print_page_label || '目标不可用');
-                    return `<li><button type="button" ${available ? '' : 'disabled'}
-                        ${targetArticle ? `data-article-id="${escapeHtml(targetArticle.id)}"` : ''}
-                        ${!targetArticle && targetPage ? `data-page-link="${escapeHtml(pageLabel(targetPage))}"` : ''}>
-                        ${renderWhatsNewsCopy(item, targetArticle)}<small>${escapeHtml(targetLabel)}</small>
-                    </button></li>`;
-                }).join('')}</ul></div>`).join('')}
-            </section>`;
-        bindIssueLinks(overview, issue, false);
-        updateArticleNavigation();
-    }
-
-    function renderUnavailableFrontPage() {
-        stopTts();
-        showArticleReader(false);
-        state.currentArticleId = null;
-        document.getElementById('issue-overview').innerHTML = `
-            <header class="issue-overview-header"><span class="issue-overview-kicker">头版不可用</span><h1>今日头版</h1></header>
-            <p class="issue-overview-empty">本期没有可用的头版目录数据，未自动生成或推测目录。</p>`;
-        updateArticleNavigation();
-    }
-
-    function renderPrintPage(issue, label) {
-        stopTts();
-        showArticleReader(false);
-        state.currentArticleId = null;
-        const overview = document.getElementById('issue-overview');
-        const page = findPrintPage(issue, label);
-        if (!page) {
-            overview.innerHTML = `<header class="issue-overview-header"><span class="issue-overview-kicker">版面不可用</span><h1>${escapeHtml(label || '未知版面')}</h1></header><p class="issue-overview-empty">本期数据中没有这个版面，未自动跳转到其他内容。</p>`;
-            updateArticleNavigation();
-            return;
-        }
-        overview.innerHTML = `<header class="issue-overview-header"><span class="issue-overview-kicker">纸质版面</span><h1>${escapeHtml(pageLabel(page))}</h1><p>${escapeHtml(displayPrintSection(page.print_section) || '栏目未标注')}</p></header><section class="print-page-articles"><h2>本版文章</h2>${renderOverviewArticleList(articlesForPage(issue, page), '当前数据中没有可用文章。')}</section>`;
-        bindIssueLinks(overview, issue, false);
-        updateArticleNavigation();
-    }
-
     function buildLocalSummary(article) {
         const words = String(article.content_markdown || '').split(/\s+/).filter(Boolean).length;
-        return [
+        const lines = [
             '### 基本信息',
-            `- 版面：${[article.print_page_label, article.print_section].filter(Boolean).join(' · ') || '未知'}`,
-            `- 分类：${article.category || 'General'}`,
-            `- PDF 页码：${article.page || '未知'}`,
+            `- 分类：${article.section || 'General'}`,
             `- 正文字数：约 ${words} words`,
             '',
             '### 处理状态',
             article.compiled_article ? '- 已完成 LLM 结构化编译。' : '- 当前文章使用本地段落整理，暂无中文深度解读。',
-        ].join('\n');
+        ];
+        if (Number(article.page) > 0) lines.splice(2, 0, `- 页码：${article.page}`);
+        return lines.join('\n');
     }
 
     function renderImageGallery(article, issue) {
@@ -1221,39 +627,92 @@
             return;
         }
 
-        const imageMarkup = renderArticleImages(article, issue);
-        grid.innerHTML = imageMarkup + paragraphs.map((paragraph, index) => {
+        const placements = normalizeImagePlacements(article);
+        const hasPlacements = placements.length > 0;
+        const leadMarkup = hasPlacements
+            ? renderPlacedImages(placements.filter(item => item.placement === 'lead'), issue, 'lead')
+            : renderArticleImages(article, issue);
+        const isCaixin = issue && issue.publication_type === 'CX';
+        grid.classList.toggle('is-source-only', Boolean(isCaixin));
+        const paragraphMarkup = paragraphs.map((paragraph, index) => {
             const zh = paragraph.zh_text
                 ? renderMarkdown(paragraph.zh_text, issue)
-                : '<span class="text-muted">暂无中文翻译</span>';
+                : '';
             const en = paragraph.en_text
                 ? renderMarkdown(paragraph.en_text, issue)
                 : '';
+            const placedAfter = hasPlacements
+                ? renderPlacedImages(
+                    placements.filter(item => item.placement === 'after_paragraph'
+                        && Number(item.after_paragraph_index) === index + 1),
+                    issue,
+                    'inline'
+                )
+                : '';
+            if (isCaixin) {
+                return `
+                <div class="bilingual-pair source-only" data-para-id="${escapeHtml(paragraph.para_id || '')}"
+                     data-paragraph-index="${index + 1}">
+                    <div class="bilingual-pair-zh">${zh}</div>
+                </div>
+                ${placedAfter}`;
+            }
             return `
                 <div class="bilingual-pair" data-para-id="${escapeHtml(paragraph.para_id || '')}"
                      data-paragraph-index="${index + 1}">
                     <div class="bilingual-pair-en">${en}</div>
                     <div class="bilingual-pair-zh">${zh}</div>
                 </div>
-            `;
+                ${placedAfter}`;
         }).join('');
+        const unlocatedMarkup = hasPlacements
+            ? renderPlacedImages(
+                placements.filter(item => !['lead', 'after_paragraph'].includes(item.placement)),
+                issue,
+                'unlocated'
+            )
+            : '';
+        grid.innerHTML = leadMarkup + paragraphMarkup + unlocatedMarkup;
         applyGlossaryAnnotations(grid, article, issue);
     }
 
+    function normalizeImagePlacements(article) {
+        const knownPaths = new Set((article.images || []).map(String));
+        return (article.image_placements || [])
+            .filter(item => item && item.path && (!knownPaths.size || knownPaths.has(String(item.path))))
+            .map(item => ({
+                path: String(item.path),
+                placement: item.placement || 'unlocated',
+                after_paragraph_index: item.after_paragraph_index,
+                caption: item.caption || '',
+                credit: item.credit || '',
+                alt_text: item.alt_text || '',
+            }));
+    }
+
+    function renderPlacedImages(items, issue, position) {
+        if (!items.length) return '';
+        const title = position === 'unlocated' ? '<div class="article-image-analysis-title">未定位图片</div>' : '';
+        return `<div class="article-image-analysis article-image-${escapeHtml(position)}">${title}<div class="article-image-grid">${items.map((item, index) => {
+            const src = resolveIssueAsset(issue, item.path);
+            const alt = item.alt_text || item.caption || '';
+            const captionParts = [item.caption, item.credit].filter(Boolean);
+            return `<figure class="article-image-item" data-image-index="${index}">
+                <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy">
+                ${captionParts.length ? `<figcaption>${captionParts.map(escapeHtml).join('<br>')}</figcaption>` : ''}
+            </figure>`;
+        }).join('')}</div></div>`;
+    }
+
     function renderArticleImages(article, issue) {
-        const insights = article.image_insights || [];
-        const insightByPath = new Map(insights.map(item => [String(item.path || ''), item]));
         const images = (article.images || []).map(path => ({
             path: resolveIssueAsset(issue, path),
             rawPath: path,
-            insight: insightByPath.get(String(path)) || null,
         }));
         if (!images.length) return '';
         return `<div class="article-image-analysis"><div class="article-image-analysis-title">图片与图表</div><div class="article-image-grid">${images.map((image, index) => {
-            const insight = image.insight || {};
-            const caption = insight.description || article.title || '';
-            const kind = insight.image_type === 'chart' ? '📊 图表' : '图片';
-            return `<figure class="article-image-item" data-image-index="${index}"><img src="${escapeHtml(image.path)}" alt="${escapeHtml(caption)}" loading="lazy"><figcaption><span class="article-image-kind">${kind}</span>${escapeHtml(caption)}</figcaption></figure>`;
+            const caption = article.title || '';
+            return `<figure class="article-image-item" data-image-index="${index}"><img src="${escapeHtml(image.path)}" alt="${escapeHtml(caption)}" loading="lazy"><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
         }).join('')}</div></div>`;
     }
 
@@ -1567,12 +1026,7 @@
 
     function highlightCurrentArticle() {
         document.querySelectorAll('.article-item').forEach(item => {
-            const active = state.currentIssueView === 'article'
-                && item.dataset.articleId === state.currentArticleId
-                && item.dataset.primaryMembership === 'true';
-            item.classList.toggle('is-active', active);
-            if (active) item.setAttribute('aria-current', 'true');
-            else item.removeAttribute('aria-current');
+            item.classList.toggle('is-active', item.dataset.articleId === state.currentArticleId);
         });
         setTimeout(() => {
             const active = document.querySelector('#article-list .article-item.is-active');
@@ -1658,27 +1112,19 @@
         });
     }
 
-    function focusableElements(root) {
-        return Array.from(root.querySelectorAll(
-            'button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), '
-            + 'a[href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )).filter(element => !element.closest('[hidden]') && element.getClientRects().length > 0);
-    }
-
-    function openTocSheet(trigger) {
+    function openTocSheet() {
         const sheet = document.getElementById('toc-sheet');
         const body = document.getElementById('toc-sheet-body');
-        const search = document.getElementById('toc-search');
-        if (!state.currentIssue) return;
-        if (tocUiState.hideTimer !== null) {
-            clearTimeout(tocUiState.hideTimer);
-            tocUiState.hideTimer = null;
-        }
-        tocUiState.returnFocus = trigger instanceof HTMLElement ? trigger : document.activeElement;
-        body.innerHTML = renderArticleList(state.currentIssue);
-        bindIssueLinks(body, state.currentIssue, true);
-        syncIssueSearchInputs();
-        applyTocSearch();
+        body.innerHTML = renderArticleList(state.currentArticles || []);
+        body.querySelectorAll('.article-item').forEach(item => {
+            item.classList.toggle('is-active', item.dataset.articleId === state.currentArticleId);
+            item.addEventListener('click', () => {
+                closeTocSheet();
+                if (item.dataset.articleId && item.dataset.articleId !== state.currentArticleId) {
+                    navigate(`/issue/${encodeURIComponent(state.currentIssueId)}/${encodeURIComponent(item.dataset.articleId)}`);
+                }
+            });
+        });
         sheet.hidden = false;
         void sheet.offsetWidth;
         sheet.classList.add('is-open');
@@ -1687,36 +1133,19 @@
             trigger.setAttribute('aria-expanded', 'true');
         });
         document.body.style.overflow = 'hidden';
-        window.requestAnimationFrame(() => {
-            const target = search || body.querySelector('[aria-current], button');
-            target?.focus();
-        });
     }
 
-    function closeTocSheet(restoreFocus = true, immediate = false) {
+    function closeTocSheet() {
         const sheet = document.getElementById('toc-sheet');
-        if (!sheet) return;
         sheet.classList.remove('is-open');
-        if (tocUiState.hideTimer !== null) clearTimeout(tocUiState.hideTimer);
-        if (immediate) {
-            sheet.hidden = true;
-            tocUiState.hideTimer = null;
-        } else {
-            tocUiState.hideTimer = setTimeout(() => {
-                tocUiState.hideTimer = null;
-                if (!sheet.classList.contains('is-open')) sheet.hidden = true;
-            }, 300);
-        }
+        setTimeout(() => {
+            if (!sheet.classList.contains('is-open')) sheet.hidden = true;
+        }, 300);
         document.querySelectorAll('[data-toc-trigger]').forEach(trigger => {
             trigger.classList.remove('is-active');
             trigger.setAttribute('aria-expanded', 'false');
         });
         document.body.style.overflow = '';
-        const returnFocus = tocUiState.returnFocus;
-        tocUiState.returnFocus = null;
-        if (restoreFocus && returnFocus instanceof HTMLElement && returnFocus.isConnected) {
-            returnFocus.focus();
-        }
     }
 
     function setupTocSheet() {
@@ -1725,42 +1154,11 @@
                 event.preventDefault();
                 event.stopPropagation();
                 const sheet = document.getElementById('toc-sheet');
-                sheet.classList.contains('is-open') ? closeTocSheet() : openTocSheet(event.currentTarget);
+                sheet.classList.contains('is-open') ? closeTocSheet() : openTocSheet();
             });
         });
         document.getElementById('toc-sheet-backdrop').addEventListener('click', closeTocSheet);
         document.getElementById('toc-sheet-close').addEventListener('click', closeTocSheet);
-        const input = document.getElementById('toc-search');
-        const clear = document.getElementById('toc-search-clear');
-        input.addEventListener('input', () => updateIssueSearch(input.value));
-        clear.addEventListener('click', () => {
-            updateIssueSearch('');
-            input.focus();
-        });
-        document.getElementById('toc-sheet').addEventListener('keydown', event => {
-            const sheet = event.currentTarget;
-            if (!sheet.classList.contains('is-open')) return;
-            if (event.key === 'Escape') {
-                event.preventDefault();
-                closeTocSheet();
-                return;
-            }
-            if (event.key !== 'Tab') return;
-            const focusable = focusableElements(sheet.querySelector('.toc-sheet-panel'));
-            if (!focusable.length) {
-                event.preventDefault();
-                return;
-            }
-            const first = focusable[0];
-            const last = focusable[focusable.length - 1];
-            if (event.shiftKey && document.activeElement === first) {
-                event.preventDefault();
-                last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-                event.preventDefault();
-                first.focus();
-            }
-        });
     }
 
     function setupThemeToggle() {
@@ -1819,44 +1217,18 @@
     function setupNavSearch() {
         const input = document.getElementById('nav-search');
         const clear = document.getElementById('nav-search-clear');
-        input.addEventListener('input', () => updateIssueSearch(input.value));
+        input.addEventListener('input', applyNavSearch);
         clear.addEventListener('click', () => {
-            updateIssueSearch('');
+            input.value = '';
+            applyNavSearch();
             input.focus();
         });
         input.addEventListener('keydown', event => {
             if (event.key === 'Escape') {
-                updateIssueSearch('');
+                input.value = '';
+                applyNavSearch();
             }
         });
-    }
-
-    function activateIssueSearch(issueId) {
-        if (state.issueSearchIssueId !== issueId) {
-            state.issueSearchIssueId = issueId;
-            state.issueSearchQuery = '';
-        }
-        syncIssueSearchInputs();
-    }
-
-    function clearIssueSearch() {
-        state.issueSearchIssueId = null;
-        state.issueSearchQuery = '';
-        syncIssueSearchInputs();
-    }
-
-    function syncIssueSearchInputs() {
-        ['nav-search', 'toc-search'].forEach(id => {
-            const input = document.getElementById(id);
-            if (input && input.value !== state.issueSearchQuery) input.value = state.issueSearchQuery;
-        });
-    }
-
-    function updateIssueSearch(query) {
-        state.issueSearchQuery = String(query || '');
-        syncIssueSearchInputs();
-        applyNavSearch();
-        applyTocSearch();
     }
 
     function applyNavSearch() {
@@ -1865,13 +1237,11 @@
         const list = document.getElementById('article-list');
         const empty = document.getElementById('nav-search-empty');
         if (!input || !clear || !list || !empty) return;
-        const query = state.issueSearchQuery.trim().toLowerCase();
+        const query = input.value.trim().toLowerCase();
         clear.hidden = !query;
         let totalVisible = 0;
         list.querySelectorAll('.article-group').forEach(group => {
             let groupVisible = 0;
-            const pageLink = group.querySelector('[data-page-link], [data-frontpage]');
-            const pageMatched = !!pageLink && (!query || (pageLink.dataset.searchTitle || '').includes(query));
             group.querySelectorAll('.article-item').forEach(item => {
                 const matched = !query || (item.dataset.searchTitle || '').includes(query);
                 item.classList.toggle('is-hidden', !matched);
@@ -1880,35 +1250,7 @@
                     totalVisible++;
                 }
             });
-            group.classList.toggle('is-hidden', groupVisible === 0 && !pageMatched);
-            if (pageMatched && groupVisible === 0) totalVisible++;
-        });
-        empty.hidden = totalVisible > 0 || !query;
-    }
-
-    function applyTocSearch() {
-        const input = document.getElementById('toc-search');
-        const clear = document.getElementById('toc-search-clear');
-        const list = document.getElementById('toc-sheet-body');
-        const empty = document.getElementById('toc-search-empty');
-        if (!input || !clear || !list || !empty) return;
-        const query = state.issueSearchQuery.trim().toLowerCase();
-        clear.hidden = !query;
-        let totalVisible = 0;
-        list.querySelectorAll('.article-group').forEach(group => {
-            let groupVisible = 0;
-            const pageLink = group.querySelector('[data-page-link], [data-frontpage]');
-            const pageMatched = !!pageLink && (!query || (pageLink.dataset.searchTitle || '').includes(query));
-            group.querySelectorAll('.article-item').forEach(item => {
-                const matched = !query || (item.dataset.searchTitle || '').includes(query);
-                item.classList.toggle('is-hidden', !matched);
-                if (matched) {
-                    groupVisible++;
-                    totalVisible++;
-                }
-            });
-            group.classList.toggle('is-hidden', groupVisible === 0 && !pageMatched);
-            if (pageMatched && groupVisible === 0) totalVisible++;
+            group.classList.toggle('is-hidden', groupVisible === 0);
         });
         empty.hidden = totalVisible > 0 || !query;
     }
@@ -1928,6 +1270,32 @@
     }
 
     let currentUtterance = null;
+
+    function selectVoice(lang) {
+        const voices = window.speechSynthesis.getVoices();
+        if (!voices.length) return null;
+        const isEnglish = lang.toLowerCase().startsWith('en');
+        const preferredNames = isEnglish
+            ? ['daniel', 'oliver', 'samantha', 'karen', 'google uk english', 'google us english']
+            : [];
+        const scored = voices.map(voice => {
+            const voiceLang = String(voice.lang || '').toLowerCase();
+            const voiceName = String(voice.name || '').toLowerCase();
+            let score = 0;
+            if (isEnglish) {
+                if (!voiceLang.startsWith('en')) return { voice, score: -1000 };
+                score += voiceLang.startsWith('en-gb') ? 120 : 80;
+                if (preferredNames.some(name => voiceName.includes(name))) score += 30;
+                if (voice.localService) score += 5;
+            } else if (voiceLang.startsWith('zh')) {
+                score += voiceLang.startsWith('zh-cn') ? 120 : 80;
+            } else {
+                score = -1000;
+            }
+            return { voice, score };
+        }).sort((left, right) => right.score - left.score);
+        return scored[0] && scored[0].score > -1000 ? scored[0].voice : null;
+    }
 
     function setupTtsButtons() {
         bindTts('tts-summary', () => document.getElementById('summary-content').textContent, 'zh-CN');
@@ -1949,7 +1317,9 @@
             if (!text) return;
             currentUtterance = new SpeechSynthesisUtterance(text.slice(0, 18000));
             currentUtterance.lang = lang;
-            currentUtterance.rate = lang.startsWith('zh') ? 0.95 : 1.0;
+            const voice = selectVoice(lang);
+            if (voice) currentUtterance.voice = voice;
+            currentUtterance.rate = lang.startsWith('zh') ? 0.95 : 0.92;
             currentUtterance.onend = stopTts;
             currentUtterance.onerror = stopTts;
             button.classList.add('is-playing');
@@ -1973,6 +1343,11 @@
         });
     }
 
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+        window.speechSynthesis.getVoices();
+    }
+
     function collectBilingualText(lang) {
         const selector = lang === 'en' ? '.bilingual-pair-en' : '.bilingual-pair-zh';
         return Array.from(document.querySelectorAll(selector))
@@ -1982,22 +1357,16 @@
     }
 
     function route() {
-        closeTocSheet(false, true);
-        const routeState = parseHash();
-        const { publication, issueId } = routeState;
+        const { publication, issueId, articleId } = parseHash();
         if (issueId) {
-            switchView('view-issue', () => renderIssue(issueId, routeState));
+            switchView('view-issue', () => renderIssue(issueId, articleId));
         } else if (publication) {
-            clearIssueSearch();
             state.currentPublication = publication;
             switchView('view-wall', renderWall);
         } else {
-            clearIssueSearch();
             state.currentPublication = null;
             state.currentIssueId = null;
             state.currentArticleId = null;
-            state.currentIssueView = null;
-            state.currentPageLabel = null;
             state.currentIssue = null;
             state.currentArticles = [];
             switchView('view-wall', renderWall);
