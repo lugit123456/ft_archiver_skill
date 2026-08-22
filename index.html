@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FT Archive · 金融时报双语归档</title>
+    <meta name="description" content="金融时报中英双语归档资料库">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="frontend_old/assets/style.css?v=20260728-mobile-tabs-1">
+</head>
+<body>
+    <header class="masthead">
+        <div class="masthead-inner">
+            <a href="#/" class="masthead-logo">
+                <span class="logo-en">FT Archive</span>
+                <span class="logo-divider"></span>
+                <span class="logo-zh">金融时报归档</span>
+            </a>
+            <div class="masthead-meta">
+                <span id="masthead-date"></span>
+                <button class="theme-toggle" id="theme-toggle" aria-label="切换主题">
+                    <span class="icon-sun">☀</span>
+                    <span class="icon-moon">☾</span>
+                </button>
+                <span class="masthead-tag">Web · LLM</span>
+            </div>
+        </div>
+        <div class="masthead-rule"></div>
+    </header>
+
+    <main id="view-wall" class="view view-wall is-active">
+        <section id="cover-grid" class="cover-grid"></section>
+        <div id="empty-state" class="empty-state" hidden>
+            <div class="empty-icon">□</div>
+            <h2>暂无数据</h2>
+            <p>请先运行解析流程生成 <code>output_results/database_index.js</code>。</p>
+        </div>
+    </main>
+
+    <main id="view-publication" class="view view-publication">
+        <div class="publication-toolbar">
+            <button class="issue-home-link" id="btn-publication-back" type="button" aria-label="返回封面墙">
+                <span class="issue-home-icon" aria-hidden="true">←</span>
+                <span>返回封面墙</span>
+            </button>
+            <div>
+                <span class="publication-kicker">Publication</span>
+                <h1 id="publication-title" class="publication-title"></h1>
+            </div>
+            <span id="publication-meta" class="publication-meta"></span>
+        </div>
+        <section id="issue-grid" class="cover-grid"></section>
+        <div id="publication-empty" class="empty-state" hidden>
+            <div class="empty-icon">□</div>
+            <h2>暂无已抓取期刊</h2>
+        </div>
+    </main>
+
+    <main id="view-issue" class="view view-issue">
+        <div class="issue-toolbar">
+            <nav class="issue-breadcrumb" aria-label="当前位置">
+                <button class="issue-home-link" id="btn-back" type="button" aria-label="返回封面墙">
+                    <span class="issue-home-icon" aria-hidden="true">←</span>
+                    <span>返回封面墙</span>
+                </button>
+                <span class="issue-breadcrumb-separator" aria-hidden="true">/</span>
+                <span class="issue-date" id="issue-date-label"></span>
+            </nav>
+            <button class="mobile-nav-toggle" id="mobile-nav-toggle" data-toc-trigger aria-label="切换文章目录" aria-expanded="false">
+                <span class="mobile-nav-icon">☰</span>
+                <span class="mobile-nav-label">本期目录</span>
+            </button>
+            <span class="issue-id" id="issue-id-label"></span>
+        </div>
+
+        <div class="issue-body">
+            <aside class="section-nav">
+                <div class="section-nav-header">
+                    <span class="section-nav-label">本期目录</span>
+                    <span class="section-nav-count" id="article-count"></span>
+                </div>
+                <div class="section-nav-search">
+                    <span class="search-icon">⌕</span>
+                    <input type="search" id="nav-search" class="search-input"
+                           placeholder="搜索标题、摘要、正文" autocomplete="off">
+                    <button class="search-clear" id="nav-search-clear" aria-label="清除" hidden>×</button>
+                </div>
+                <div class="section-nav-empty" id="nav-search-empty" hidden>
+                    <span>⌕</span> 无匹配文章
+                </div>
+                <nav id="article-list" class="article-list"></nav>
+            </aside>
+
+            <section class="article-pane">
+                <div class="article-header" id="article-header">
+                    <span class="article-section" id="current-section"></span>
+                    <h2 class="article-title-zh" id="current-title-zh"></h2>
+                    <h3 class="article-title-en" id="current-title-en"></h3>
+                </div>
+
+                <div class="summary-block summary-pane">
+                    <div class="pane-header">
+                        <span class="pane-icon">§</span>
+                        <span class="pane-title">中文解读</span>
+                        <button class="tts-btn" id="tts-summary" type="button" aria-label="朗读中文解读" title="朗读中文解读">
+                            <span class="tts-icon" aria-hidden="true">▶</span>
+                            <span class="tts-label">朗读</span>
+                        </button>
+                    </div>
+                    <article class="pane-body" id="summary-content"></article>
+                </div>
+
+                <div class="bilingual-block">
+                    <div class="bilingual-header">
+                        <span class="bilingual-icon">¶</span>
+                        <span class="bilingual-title">中英对照</span>
+                        <div class="tts-group">
+                            <button class="tts-btn" id="tts-bilingual-zh" type="button" aria-label="朗读对照中文" title="朗读对照中文">
+                                <span class="tts-icon" aria-hidden="true">▶</span>
+                                <span class="tts-label">朗读中文</span>
+                            </button>
+                            <button class="tts-btn" id="tts-bilingual-en" type="button" aria-label="朗读对照英文" title="朗读对照英文">
+                                <span class="tts-icon" aria-hidden="true">▶</span>
+                                <span class="tts-label">朗读英文</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="bilingual-grid" id="bilingual-grid"></div>
+                </div>
+
+                <nav class="article-pagination" aria-label="本期文章导航">
+                    <button class="article-pagination-button article-nav-prev" id="article-nav-prev" type="button">
+                        <span class="article-pagination-direction">← 上一篇文章</span>
+                        <span class="article-pagination-title" id="article-nav-prev-title">已是本期第一篇</span>
+                    </button>
+                    <button class="article-pagination-button article-nav-next" id="article-nav-next" type="button">
+                        <span class="article-pagination-direction">下一篇文章 →</span>
+                        <span class="article-pagination-title" id="article-nav-next-title">已是本期最后一篇</span>
+                    </button>
+                </nav>
+
+                <button class="article-bottom-toc" id="article-bottom-toc" data-toc-trigger type="button"
+                        aria-label="查看本期目录" aria-expanded="false">
+                    <span class="article-bottom-toc-icon" aria-hidden="true">☰</span>
+                    <span class="article-bottom-toc-copy">
+                        <strong>查看本期目录</strong>
+                        <span id="article-bottom-toc-count">快速选择本期其他文章</span>
+                    </span>
+                    <span class="article-bottom-toc-arrow" aria-hidden="true">›</span>
+                </button>
+            </section>
+        </div>
+    </main>
+
+    <div class="reading-tools" aria-label="阅读工具">
+        <button class="reading-tool reading-tool-top" id="back-to-top" type="button" aria-label="返回文章顶部" title="返回文章顶部">
+            <span class="reading-tool-icon" aria-hidden="true">↑</span>
+            <span class="reading-tool-label">顶部</span>
+        </button>
+    </div>
+
+    <div class="toc-sheet" id="toc-sheet" hidden>
+        <div class="toc-sheet-backdrop" id="toc-sheet-backdrop"></div>
+        <div class="toc-sheet-panel" role="dialog" aria-label="本期目录">
+            <div class="toc-sheet-header">
+                <span class="toc-sheet-title">本期目录</span>
+                <button class="toc-sheet-close" id="toc-sheet-close" type="button" aria-label="关闭">×</button>
+            </div>
+            <div class="toc-sheet-body" id="toc-sheet-body"></div>
+        </div>
+    </div>
+
+    <aside class="glossary-popover" id="glossary-popover" role="tooltip" hidden>
+        <div class="glossary-popover-heading">
+            <strong id="glossary-popover-term"></strong>
+            <span id="glossary-popover-type"></span>
+        </div>
+        <div class="glossary-popover-zh" id="glossary-popover-zh"></div>
+        <p id="glossary-popover-description"></p>
+    </aside>
+
+    <div class="glossary-sheet" id="glossary-sheet" hidden>
+        <button class="glossary-sheet-backdrop" id="glossary-sheet-backdrop" type="button"
+                aria-label="关闭术语解释"></button>
+        <section class="glossary-sheet-panel" role="dialog" aria-modal="true"
+                 aria-labelledby="glossary-sheet-term">
+            <div class="glossary-sheet-handle" aria-hidden="true"></div>
+            <header class="glossary-sheet-header">
+                <div>
+                    <span class="glossary-sheet-type" id="glossary-sheet-type"></span>
+                    <h2 id="glossary-sheet-term"></h2>
+                    <div class="glossary-sheet-zh" id="glossary-sheet-zh"></div>
+                </div>
+                <button class="glossary-sheet-close" id="glossary-sheet-close" type="button"
+                        aria-label="关闭">×</button>
+            </header>
+            <p class="glossary-sheet-description" id="glossary-sheet-description"></p>
+        </section>
+    </div>
+
+    <div class="lightbox" id="lightbox" hidden>
+        <button class="lightbox-close" id="lightbox-close" aria-label="关闭">×</button>
+        <button class="lightbox-prev" id="lightbox-prev" aria-label="上一张">‹</button>
+        <button class="lightbox-next" id="lightbox-next" aria-label="下一张">›</button>
+        <img class="lightbox-image" id="lightbox-image" src="" alt="">
+        <div class="lightbox-caption" id="lightbox-caption"></div>
+        <div class="lightbox-counter" id="lightbox-counter"></div>
+    </div>
+
+    <footer class="site-footer">
+        <span>© <span id="footer-year"></span> ft-archiver · 金融时报双语归档</span>
+        <span class="footer-tech">Powered by Web Scraper + LLM Pipeline</span>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+    <script>
+        window.PAPER_DATABASE_ROOT = './output_results/';
+        window.PAPER_FRONTEND_VERSION = '20260804-pipeline-tts-1';
+
+        const databaseIndexScript = document.createElement('script');
+        databaseIndexScript.src = `./output_results/database_index.js?v=${Date.now()}`;
+        databaseIndexScript.onload = () => {
+            const appScript = document.createElement('script');
+            appScript.src = `frontend/assets/app.js?v=${window.PAPER_FRONTEND_VERSION}`;
+            document.body.appendChild(appScript);
+        };
+        databaseIndexScript.onerror = () => {
+            document.getElementById('empty-state').hidden = false;
+            console.error('无法加载 output_results/database_index.js');
+        };
+        document.body.appendChild(databaseIndexScript);
+    </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+.env
+.ft-browser/
+.ft-sync.lock
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+logs/
+*.log
+database.js
+output_results/
+*.bak
+*.backup
+.DS_Store
