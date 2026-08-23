@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from sync_ft import (
@@ -10,14 +11,18 @@ from sync_ft import (
     _normalise_paper_article,
     _pressreader_issue_date_from_url,
     _is_truncated_pressreader_record,
+    _migrate_image_description_fields,
     _write_paper_database_index,
     _write_paper_issue_database,
+    PressReaderIssue,
     canonical_ft_url,
     parse_pressreader_candidate_rows,
     parse_pressreader_detail_payload,
     pressreader_first_page_cover_url,
     pressreader_issue_url,
+    process_ft,
     read_database_js,
+    resolve_pressreader_issue_date,
     validate_issue_date,
     write_database_js,
 )
@@ -103,6 +108,43 @@ class PressReaderSourceTests(unittest.TestCase):
             "",
         )
 
+    def test_auto_mode_accepts_latest_issue_redirect(self) -> None:
+        resolved_url = "https://ft.pressreader.com/v99c2026082200000000001001/textview"
+        self.assertEqual(
+            resolve_pressreader_issue_date(
+                "2026-08-23",
+                resolved_url,
+                accept_redirect=True,
+            ),
+            "2026-08-22",
+        )
+        with self.assertRaisesRegex(ValueError, "与请求日期"):
+            resolve_pressreader_issue_date("2026-08-23", resolved_url)
+
+    def test_process_auto_mode_uses_entitlement_issue_date(self) -> None:
+        entitlement_url = "https://ft.pressreader.com/v99c2026082200000000001001/textview"
+        page = Mock()
+        issue = PressReaderIssue(
+            "2026-08-22",
+            entitlement_url,
+            entitlement_url,
+            "",
+            [],
+        )
+        cfg = {"browser": {"user_data_path": "/tmp/ft-test", "headless": True}}
+        with (
+            patch("sync_ft.open_browser", return_value=page),
+            patch("sync_ft.activate_pressreader_entitlement", return_value=entitlement_url),
+            patch("sync_ft.discover_pressreader_issue", return_value=issue) as discover,
+            patch("sync_ft.read_database_js", return_value=[]),
+        ):
+            self.assertEqual(process_ft(cfg, dry_run=True), [])
+
+        self.assertEqual(discover.call_args.args[2], "2026-08-22")
+        self.assertEqual(discover.call_args.kwargs["preview_url"], entitlement_url)
+        self.assertTrue(discover.call_args.kwargs["accept_date_redirect"])
+        page.close.assert_called_once()
+
     def test_candidate_rows_keep_section_order_and_empty_page(self) -> None:
         candidates = parse_pressreader_candidate_rows(CARD_ROWS, "2026-08-21")
         self.assertEqual(len(candidates), 2)
@@ -184,6 +226,11 @@ class FTStorageTests(unittest.TestCase):
                 "credit": "Credit",
                 "alt_text": "Alt",
             }],
+            "image_insights": [{
+                "path": "images/example.jpg",
+                "image_type": "photo",
+                "description": "中文图片说明",
+            }],
         }
 
     def test_guid_conflict_keeps_first_record(self) -> None:
@@ -204,6 +251,23 @@ class FTStorageTests(unittest.TestCase):
         self.assertEqual(normalized["source_pages"], [])
         self.assertEqual(normalized["published_at_utc"], "")
         self.assertEqual(normalized["image_placements"][0]["caption"], "Caption")
+        self.assertNotIn("description_zh", normalized["image_placements"][0])
+        self.assertEqual(normalized["image_insights"][0]["description"], "中文图片说明")
+
+    def test_legacy_placement_description_moves_to_image_insights(self) -> None:
+        placements, insights = _migrate_image_description_fields([{
+            "path": "images/example.jpg",
+            "placement": "lead",
+            "caption": "Source caption",
+            "description_zh": "中文图片说明",
+        }])
+
+        self.assertNotIn("description_zh", placements[0])
+        self.assertEqual(insights, [{
+            "path": "images/example.jpg",
+            "image_type": "photo",
+            "description": "中文图片说明",
+        }])
 
     def test_daily_database_groups_articles_by_real_section(self) -> None:
         opinion = dict(

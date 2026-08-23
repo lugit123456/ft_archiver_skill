@@ -41,6 +41,9 @@ cp .env.example .env
 ## 使用
 
 ```bash
+# 自动抓取 FT 当前最新可用期次（适合定时任务）
+python sync_ft.py
+
 # 只查看 2026-08-18 的报道列表，不写数据库
 python sync_ft.py --date 2026-08-18 --dry-run
 
@@ -62,7 +65,9 @@ python sync_ft.py --date 2026-08-18 --dry-run --debug-data ./debug
 python sync_ft.py --rebuild-outputs
 ```
 
-未传 `--date` 时默认使用本机当天日期。不存在对应期次或跳转日期不一致时，程序明确报错，不会改用其他日期。
+未传 `--date` 时，程序使用 FT `todaysnewspaper` 授权入口实际返回的最新可用期次。这个模式适合定时任务：无论在当天晚上、次日凌晨或周末执行，都不依赖运行机器的日期，也不会因“当天期次尚未发布”而发生日期不一致错误。
+
+显式传入 `--date` 时仍使用严格模式；PressReader 返回其他日期会报错，避免历史补抓时误存到错误期次。
 
 ## 数据字段
 
@@ -75,7 +80,7 @@ python sync_ft.py --rebuild-outputs
 - `paragraphs`：按原始顺序保存的 `body`/`crosshead` 节点及中英对照。
 - `images`：本地图片路径或下载失败时的原始 URL。
 - `image_placements`：图片位置、原始 caption、credit 与 alt text。
-- `image_insights`：固定为空数组；不对图片进行 AI 内容分析。
+- `image_insights`：按图片 path 保存 `image_type` 和中文 `description`；说明只翻译来源提供的 caption/alt，不根据图片猜测。
 
 图片位置规则：
 
@@ -83,6 +88,7 @@ python sync_ft.py --rebuild-outputs
 - 正文 `figure` 按 DOM 顺序标记为 `after_paragraph`。
 - 无法可靠确定位置时标记为 `unlocated`，前端放在文末。
 - PressReader 没有提供 caption、credit 或 alt 时对应字段保持为空，不猜测。
+- 中英对照区域只显示中文图片说明；使用 `--refresh-image-descriptions --date YYYY-MM-DD` 可为历史数据回填。
 
 ## 输出
 

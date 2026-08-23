@@ -124,6 +124,90 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertIn("忠实翻译全文", completions.requests[1]["messages"][0]["content"])  # type: ignore[index]
         self.assertIn("原创编辑稿", completions.requests[2]["messages"][0]["content"])  # type: ignore[index]
 
+    def test_source_image_description_is_translated_without_replacing_metadata(self) -> None:
+        client, completions = _client([
+            {"paragraphs": [{"zh_text": "正文译文。", "role": "body"}]},
+            {"title_zh": "中文标题", "summary_md": _natural_summary()},
+            {
+                "images": [{
+                    "index": 1,
+                    "description": "伦敦金融城，生产率提升有助于缓解公共财政压力。",
+                }],
+            },
+        ])
+        placement = {
+            "path": "images/example.jpg",
+            "placement": "lead",
+            "after_paragraph_index": None,
+            "caption": "",
+            "credit": "FT",
+            "alt_text": "The City of London. Higher productivity could ease fiscal strains.",
+        }
+
+        article = compile_article_record(
+            client,
+            _config(),
+            issue_date="2026-08-21",
+            section="FRONT PAGE",
+            title="Productivity revival",
+            url="https://example.com/productivity",
+            body="A complete source paragraph.",
+            article_id="art_test_image_001",
+            log_=logging.getLogger("test"),
+            images=["images/example.jpg"],
+            image_placements=[placement],
+        )
+
+        self.assertIsNotNone(article)
+        assert article is not None
+        self.assertEqual(len(completions.requests), 3)
+        stored_placement = article["image_placements"][0]
+        self.assertEqual(stored_placement["alt_text"], placement["alt_text"])
+        self.assertEqual(stored_placement["credit"], "FT")
+        self.assertNotIn("description_zh", stored_placement)
+        stored_insight = article["image_insights"][0]
+        self.assertEqual(stored_insight["path"], placement["path"])
+        self.assertEqual(
+            stored_insight["description"],
+            "伦敦金融城，生产率提升有助于缓解公共财政压力。",
+        )
+        self.assertNotIn("description_zh", placement)
+        self.assertTrue(article["compiled_article"])
+
+    def test_existing_chinese_image_description_needs_no_extra_request(self) -> None:
+        client, completions = _client([
+            {"paragraphs": [{"zh_text": "正文译文。", "role": "body"}]},
+            {"title_zh": "中文标题", "summary_md": _natural_summary()},
+        ])
+        article = compile_article_record(
+            client,
+            _config(),
+            issue_date="2026-08-21",
+            section="FRONT PAGE",
+            title="Chinese caption",
+            url="https://example.com/chinese-caption",
+            body="A complete source paragraph.",
+            article_id="art_test_image_002",
+            log_=logging.getLogger("test"),
+            images=["images/example.jpg"],
+            image_placements=[{
+                "path": "images/example.jpg",
+                "placement": "lead",
+                "caption": "伦敦金融城资料照片",
+                "credit": "FT",
+                "alt_text": "",
+            }],
+        )
+
+        self.assertIsNotNone(article)
+        assert article is not None
+        self.assertEqual(len(completions.requests), 2)
+        self.assertEqual(
+            article["image_insights"][0]["description"],
+            "伦敦金融城资料照片",
+        )
+        self.assertNotIn("description_zh", article["image_placements"][0])
+
     def test_summary_length_expands_with_source_size(self) -> None:
         self.assertEqual(
             _summary_length_bounds([{"en_text": "word " * 900}]),

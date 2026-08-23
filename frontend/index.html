@@ -3,21 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Paper Archive · 报刊双语资料库</title>
-    <meta name="description" content="基于 PDF 解析与 LLM 编译的私有报刊资料库">
+    <title>FT Archive · 金融时报双语归档</title>
+    <meta name="description" content="金融时报中英双语归档资料库">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=20260806-ft-briefing-1">
+    <link rel="stylesheet" href="assets/style.css?v=20260728-mobile-tabs-1">
 </head>
 <body>
     <header class="masthead">
         <div class="masthead-inner">
             <a href="#/" class="masthead-logo">
-                <span class="logo-en">Paper Archive</span>
+                <span class="logo-en">FT Archive</span>
                 <span class="logo-divider"></span>
-                <span class="logo-zh">资料库</span>
+                <span class="logo-zh">金融时报归档</span>
             </a>
             <div class="masthead-meta">
                 <span id="masthead-date"></span>
@@ -25,7 +25,7 @@
                     <span class="icon-sun">☀</span>
                     <span class="icon-moon">☾</span>
                 </button>
-                <span class="masthead-tag">PDF · OCR · LLM</span>
+                <span class="masthead-tag">Web · LLM</span>
             </div>
         </div>
         <div class="masthead-rule"></div>
@@ -103,15 +103,11 @@
             </aside>
 
             <section class="article-pane">
-                <section class="issue-overview" id="issue-overview" hidden></section>
-
-                <div id="article-reader">
-                    <div class="article-header" id="article-header">
-                        <span class="article-section" id="current-section"></span>
-                        <span class="article-category" id="current-category"></span>
-                        <h2 class="article-title-zh" id="current-title-zh"></h2>
-                        <h3 class="article-title-en" id="current-title-en"></h3>
-                    </div>
+                <div class="article-header" id="article-header">
+                    <span class="article-section" id="current-section"></span>
+                    <h2 class="article-title-zh" id="current-title-zh"></h2>
+                    <h3 class="article-title-en" id="current-title-en"></h3>
+                </div>
 
                 <div class="summary-block summary-pane">
                     <div class="pane-header">
@@ -130,11 +126,11 @@
                         <span class="bilingual-icon">¶</span>
                         <span class="bilingual-title">中英对照</span>
                         <div class="tts-group">
-                            <button class="tts-btn" id="tts-bilingual-zh" type="button" aria-label="朗读对照中文" title="朗读对照中文">
+                            <button class="tts-btn" id="tts-bilingual-zh" type="button" aria-label="朗读原文" title="朗读原文">
                                 <span class="tts-icon" aria-hidden="true">▶</span>
-                                <span class="tts-label">朗读中文</span>
+                                <span class="tts-label">朗读原文</span>
                             </button>
-                            <button class="tts-btn" id="tts-bilingual-en" type="button" aria-label="朗读对照英文" title="朗读对照英文">
+                            <button class="tts-btn cx-hide" id="tts-bilingual-en" type="button" aria-label="朗读对照英文" title="朗读对照英文">
                                 <span class="tts-icon" aria-hidden="true">▶</span>
                                 <span class="tts-label">朗读英文</span>
                             </button>
@@ -154,16 +150,15 @@
                     </button>
                 </nav>
 
-                    <button class="article-bottom-toc" id="article-bottom-toc" data-toc-trigger type="button"
-                            aria-label="查看本期目录" aria-expanded="false">
-                        <span class="article-bottom-toc-icon" aria-hidden="true">☰</span>
-                        <span class="article-bottom-toc-copy">
-                            <strong>查看本期目录</strong>
-                            <span id="article-bottom-toc-count">快速选择本期其他文章</span>
-                        </span>
-                        <span class="article-bottom-toc-arrow" aria-hidden="true">›</span>
-                    </button>
-                </div>
+                <button class="article-bottom-toc" id="article-bottom-toc" data-toc-trigger type="button"
+                        aria-label="查看本期目录" aria-expanded="false">
+                    <span class="article-bottom-toc-icon" aria-hidden="true">☰</span>
+                    <span class="article-bottom-toc-copy">
+                        <strong>查看本期目录</strong>
+                        <span id="article-bottom-toc-count">快速选择本期其他文章</span>
+                    </span>
+                    <span class="article-bottom-toc-arrow" aria-hidden="true">›</span>
+                </button>
             </section>
         </div>
     </main>
@@ -177,19 +172,10 @@
 
     <div class="toc-sheet" id="toc-sheet" hidden>
         <div class="toc-sheet-backdrop" id="toc-sheet-backdrop"></div>
-        <div class="toc-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="toc-sheet-title">
+        <div class="toc-sheet-panel" role="dialog" aria-label="本期目录">
             <div class="toc-sheet-header">
-                <span class="toc-sheet-title" id="toc-sheet-title">本期目录</span>
+                <span class="toc-sheet-title">本期目录</span>
                 <button class="toc-sheet-close" id="toc-sheet-close" type="button" aria-label="关闭">×</button>
-            </div>
-            <div class="toc-sheet-search">
-                <span class="search-icon" aria-hidden="true">⌕</span>
-                <input type="search" id="toc-search" class="search-input"
-                       placeholder="搜索标题、摘要、正文" autocomplete="off">
-                <button class="search-clear" id="toc-search-clear" type="button" aria-label="清除" hidden>×</button>
-            </div>
-            <div class="section-nav-empty toc-sheet-empty" id="toc-search-empty" hidden>
-                <span>⌕</span> 无匹配文章
             </div>
             <div class="toc-sheet-body" id="toc-sheet-body"></div>
         </div>
@@ -233,15 +219,27 @@
     </div>
 
     <footer class="site-footer">
-        <span>© <span id="footer-year"></span> auto-paper-md-converter · 私有报刊资料库</span>
-        <span class="footer-tech">Powered by PDF Parser + LLM Pipeline</span>
+        <span>© <span id="footer-year"></span> ft-archiver · 金融时报双语归档</span>
+        <span class="footer-tech">Powered by Web Scraper + LLM Pipeline</span>
     </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
     <script>
-        window.PAPER_FRONTEND_VERSION = '20260806-ft-briefing-1';
+        window.PAPER_DATABASE_ROOT = '../output_results/';
+        window.PAPER_FRONTEND_VERSION = '20260804-pipeline-tts-1';
+
+        const databaseIndexScript = document.createElement('script');
+        databaseIndexScript.src = `../output_results/database_index.js?v=${Date.now()}`;
+        databaseIndexScript.onload = () => {
+            const appScript = document.createElement('script');
+            appScript.src = `assets/app.js?v=${window.PAPER_FRONTEND_VERSION}`;
+            document.body.appendChild(appScript);
+        };
+        databaseIndexScript.onerror = () => {
+            document.getElementById('empty-state').hidden = false;
+            console.error('无法加载 output_results/database_index.js');
+        };
+        document.body.appendChild(databaseIndexScript);
     </script>
-    <script src="assets/data-config.js?v=20260806-ft-briefing-1"></script>
-    <script src="assets/bootstrap.js?v=20260806-ft-briefing-1"></script>
 </body>
 </html>
