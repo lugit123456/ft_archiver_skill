@@ -1749,6 +1749,28 @@ def _pressreader_issue_date_from_url(value: str) -> str:
     return datetime.strptime(matched.group("date"), "%Y%m%d").date().isoformat()
 
 
+def resolve_pressreader_issue_date(
+    requested_date: str,
+    resolved_url: str,
+    *,
+    accept_redirect: bool = False,
+) -> str:
+    """Return the actual issue date, optionally accepting FT's latest-issue redirect."""
+    resolved_date = _pressreader_issue_date_from_url(resolved_url)
+    if not resolved_date:
+        raise ValueError(f"PressReader 返回的 URL 不含有效期次日期: {resolved_url}")
+    if resolved_date == requested_date:
+        return resolved_date
+    if accept_redirect:
+        log.info(
+            "PressReader 自动选择实际可用期次: 请求 %s，实际 %s",
+            requested_date,
+            resolved_date,
+        )
+        return resolved_date
+    raise ValueError(f"PressReader 返回期次 {resolved_date}，与请求日期 {requested_date} 不一致")
+
+
 def pressreader_first_page_cover_url(resolved_url: str, width: int = 800) -> str:
     """Build the stable full-page image URL for page one of a resolved issue."""
     parsed = urlparse(str(resolved_url or "").strip())
@@ -1880,6 +1902,7 @@ def discover_pressreader_issue(
     *,
     preview_url: str = "",
     debug_data_dir: Path | None = None,
+    accept_date_redirect: bool = False,
 ) -> PressReaderIssue:
     """Open one PressReader issue and collect every text-view article card."""
     requested_url = preview_url or pressreader_issue_url(
@@ -1898,9 +1921,11 @@ def discover_pressreader_issue(
         timeout_s,
         "PressReader 期次入口没有跳转到有效报纸",
     )
-    resolved_date = _pressreader_issue_date_from_url(resolved_url)
-    if resolved_date != issue_date:
-        raise ValueError(f"PressReader 返回期次 {resolved_date}，与请求日期 {issue_date} 不一致")
+    issue_date = resolve_pressreader_issue_date(
+        issue_date,
+        resolved_url,
+        accept_redirect=accept_date_redirect,
+    )
 
     view_state = _wait_for_pressreader(
         page,
@@ -3237,6 +3262,192 @@ def _request_article_translation(
     raise last_error or RuntimeError("逐段翻译失败")
 
 
+def _image_description_source(item: dict[str, Any]) -> str:
+    """Return source-provided image copy only; never infer a description."""
+    return _clean_pressreader_text(item.get("caption") or item.get("alt_text"))
+
+
+def _migrate_image_description_fields(
+    image_placements: list[dict[str, Any]],
+    image_insights: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Move legacy placement descriptions into the shared image_insights schema."""
+    placements: list[dict[str, Any]] = []
+    descriptions: dict[str, str] = {}
+    insights: list[dict[str, Any]] = []
+    insight_by_path: dict[str, dict[str, Any]] = {}
+
+    for raw in image_insights or []:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        item["path"] = path
+        insights.append(item)
+        insight_by_path.setdefault(path, item)
+
+    for raw in image_placements:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        path = str(item.get("path") or "").strip()
+        legacy_description = _clean_pressreader_text(
+            item.pop("description_zh", "") or item.pop("caption_zh", "")
+        )
+        item.pop("caption_zh", None)
+        if path and legacy_description:
+            descriptions[path] = legacy_description
+        placements.append(item)
+
+    for path, description in descriptions.items():
+        insight = insight_by_path.get(path)
+        if insight is None:
+            insight = {"path": path, "image_type": "photo", "description": description}
+            insights.append(insight)
+            insight_by_path[path] = insight
+        else:
+            insight["description"] = description
+            insight.setdefault("image_type", "photo")
+    return placements, insights
+
+
+def _set_image_insight_description(
+    image_insights: list[dict[str, Any]], path: str, description: str,
+) -> None:
+    for insight in image_insights:
+        if str(insight.get("path") or "") == path:
+            insight["description"] = description
+            insight.setdefault("image_type", "photo")
+            return
+    image_insights.append({
+        "path": path,
+        "image_type": "photo",
+        "description": description,
+    })
+
+
+def _image_description_translation_prompt(
+    title: str,
+    items: list[tuple[int, str]],
+) -> str:
+    rendered = "\n".join(f"{index}. {text}" for index, text in items)
+    return f"""你是一名资深英中新闻图片编辑。请把下面由来源网站提供的英文图片说明翻译成自然、准确、便于中文读者快速浏览的中文，只返回严格 JSON。
+
+要求：
+1. 忠实保留人物、地点、时间、事实、引语和图片方位信息，不补充原文没有的内容。
+2. 使用自然中文，不逐词照搬英文语序；人名、机构名和地名按新闻编辑规范处理。
+3. 保持输入数量和 index 完全一致，不合并、不遗漏。
+4. 不写分析、评论、Markdown 或“图片显示”等额外套话。
+
+Article title: {title}
+
+Source image descriptions:
+{rendered}
+
+Return JSON in this shape:
+{{
+  "images": [
+    {{"index": 1, "description": "中文图片说明"}}
+  ]
+}}
+"""
+
+
+def _translate_image_placement_descriptions(
+    client: Any,
+    cfg: dict[str, Any],
+    *,
+    title: str,
+    image_placements: list[dict[str, Any]],
+    image_insights: list[dict[str, Any]] | None,
+    log_: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Translate source captions/alt text into image_insights descriptions."""
+    placements, insights = _migrate_image_description_fields(
+        image_placements, image_insights,
+    )
+    described_paths = {
+        str(item.get("path") or "")
+        for item in insights
+        if _clean_pressreader_text(item.get("description"))
+    }
+    for item in placements:
+        path = str(item.get("path") or "").strip()
+        source = _image_description_source(item)
+        if path and source and count_cn_chars(source) > 0 and path not in described_paths:
+            _set_image_insight_description(insights, path, source)
+            described_paths.add(path)
+    targets = [
+        (index, _image_description_source(item))
+        for index, item in enumerate(placements, start=1)
+        if str(item.get("path") or "").strip() not in described_paths
+        if _image_description_source(item)
+        and count_cn_chars(_image_description_source(item)) == 0
+    ]
+    if not targets:
+        return insights
+
+    llm = cfg["llm"]
+    prompt = _image_description_translation_prompt(title, targets)
+    max_retries = int(cfg["crawl"].get("max_retries", 2))
+    max_tokens = max(int(llm.get("max_tokens", 2048)), 1024)
+    expected_indexes = {index for index, _ in targets}
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=llm.get("model", "gpt-4o-mini"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "只返回 JSON。忠实翻译来源网站提供的图片说明，不得推测图片内容。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=min(float(llm.get("temperature", 0.4)), 0.2),
+                response_format={"type": "json_object"},
+            )
+            payload = _extract_json_payload(response.choices[0].message.content or "")
+            raw_items = payload.get("images")
+            if not isinstance(raw_items, list):
+                raise LLMOutputValidationError("图片说明翻译结果不是 images 数组")
+            translated: dict[int, str] = {}
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    index = int(item.get("index") or 0)
+                except (TypeError, ValueError):
+                    continue
+                description = _clean_pressreader_text(
+                    item.get("description") or item.get("description_zh")
+                )
+                if index in expected_indexes and description and count_cn_chars(description) > 0:
+                    translated[index] = description
+            if set(translated) != expected_indexes:
+                missing = sorted(expected_indexes - set(translated))
+                raise LLMOutputValidationError(
+                    "图片说明翻译存在遗漏: " + ", ".join(map(str, missing))
+                )
+            for index, description in translated.items():
+                path = str(placements[index - 1].get("path") or "").strip()
+                if path:
+                    _set_image_insight_description(insights, path, description)
+            return insights
+        except Exception as exc:
+            last_error = exc
+            log_.warning(f"图片说明翻译失败 (attempt {attempt + 1}): {exc}")
+            if not _should_retry_llm_error(exc, attempt, max_retries):
+                break
+            time.sleep(1.0)
+
+    raise last_error or RuntimeError("图片说明翻译失败")
+
+
 def _request_article_summary(
     client: Any,
     cfg: dict[str, Any],
@@ -3313,6 +3524,9 @@ def compile_article_record(
 ) -> dict[str, Any] | None:
     """把抓到的正文编译成 Economist 前端需要的结构化 article。"""
     source_paragraphs = _split_article_paragraphs(body)
+    compiled_image_placements, compiled_image_insights = _migrate_image_description_fields(
+        image_placements or [], [],
+    )
     if not source_paragraphs:
         if not images:
             return None
@@ -3328,8 +3542,8 @@ def compile_article_record(
             "content_markdown": "",
             "paragraphs": [],
             "images": images,
-            "image_placements": image_placements or [],
-            "image_insights": [],
+            "image_placements": compiled_image_placements,
+            "image_insights": compiled_image_insights,
             "glossary_entries": [],
             "term_annotations": [],
             "glossary_analysis_complete": False,
@@ -3341,7 +3555,6 @@ def compile_article_record(
 
     translation_error: Exception | None = None
     summary_error: Exception | None = None
-
     try:
         compiled_paragraphs = _request_article_translation(
             client,
@@ -3380,6 +3593,18 @@ def compile_article_record(
         title_zh = ""
         summary_md = summarize(client, cfg, title, body, log_)
 
+    try:
+        compiled_image_insights = _translate_image_placement_descriptions(
+            client,
+            cfg,
+            title=title,
+            image_placements=compiled_image_placements,
+            image_insights=compiled_image_insights,
+            log_=log_,
+        )
+    except Exception as exc:
+        log_.error(f"图片说明翻译最终失败，保留英文元数据但前端不展示: {title} ({exc})")
+
     compile_complete = translation_error is None and summary_error is None
     article = {
         "id": article_id,
@@ -3393,8 +3618,8 @@ def compile_article_record(
         "content_markdown": _format_source_content_markdown(source_paragraphs),
         "paragraphs": compiled_paragraphs,
         "images": images or [],
-        "image_placements": image_placements or [],
-        "image_insights": [],
+        "image_placements": compiled_image_placements,
+        "image_insights": compiled_image_insights,
         "compiled_article": compile_complete,
         "compile_status": "complete" if compile_complete else "fallback",
     }
@@ -3773,6 +3998,85 @@ def refresh_article_glossary(
     return refreshed
 
 
+def refresh_image_descriptions(
+    cfg: dict[str, Any], issue_date: str, article_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Backfill Chinese descriptions from stored source captions/alt text."""
+    existing = read_database_js()
+    targets: list[dict[str, Any]] = []
+    for article in existing:
+        if article.get("issue_date") != issue_date:
+            continue
+        if article_ids and article.get("id") not in article_ids:
+            continue
+        placements = list(article.get("image_placements") or [])
+        _, migrated_insights = _migrate_image_description_fields(
+            placements, list(article.get("image_insights") or []),
+        )
+        described_paths = {
+            str(item.get("path") or "")
+            for item in migrated_insights
+            if _clean_pressreader_text(item.get("description"))
+        }
+        has_legacy_fields = any(
+            isinstance(item, dict)
+            and ("description_zh" in item or "caption_zh" in item)
+            for item in placements
+        )
+        has_untranslated_source = any(
+            isinstance(item, dict)
+            and str(item.get("path") or "").strip() not in described_paths
+            and bool(_image_description_source(item))
+            for item in placements
+        )
+        if has_legacy_fields or has_untranslated_source:
+            targets.append(article)
+    if not targets:
+        log.info(f"没有需要回填中文图片说明的文章: issue={issue_date}, ids={sorted(article_ids)}")
+        return []
+
+    client: Any = None
+    refreshed: list[dict[str, Any]] = []
+    for article in targets:
+        try:
+            placements, insights = _migrate_image_description_fields(
+                list(article.get("image_placements") or []),
+                list(article.get("image_insights") or []),
+            )
+            described_paths = {
+                str(item.get("path") or "")
+                for item in insights
+                if _clean_pressreader_text(item.get("description"))
+            }
+            needs_llm = any(
+                str(item.get("path") or "").strip() not in described_paths
+                and bool(_image_description_source(item))
+                and count_cn_chars(_image_description_source(item)) == 0
+                for item in placements
+            )
+            if needs_llm and client is None:
+                client = make_llm_client(cfg)
+            article["image_placements"] = placements
+            article["image_insights"] = _translate_image_placement_descriptions(
+                client,
+                cfg,
+                title=str(article.get("title") or "Untitled"),
+                image_placements=placements,
+                image_insights=insights,
+                log_=log,
+            )
+            refreshed.append(article)
+            write_database_js(existing, authoritative=True)
+            log.info(f"[images] 已回填中文图片说明: {article.get('id')}")
+        except Exception as exc:
+            log.warning(f"[images] 中文图片说明回填失败 {article.get('id')}: {exc}")
+
+    if refreshed:
+        _sync_paper_outputs(cfg, existing, issue_date=issue_date)
+        _maybe_rebuild_index(cfg)
+    return refreshed
+
+
 def _persist_ft_state(
     cfg: dict[str, Any],
     articles: list[dict[str, Any]],
@@ -3795,6 +4099,9 @@ def _source_only_article(metadata: dict[str, Any], parsed: ParsedArticle) -> dic
         for index, item in enumerate(parsed.paragraphs, start=1)
         if str(item.get("text") or "").strip()
     ]
+    image_placements, image_insights = _migrate_image_description_fields(
+        list(metadata.get("image_placements") or []), [],
+    )
     return {
         "id": article_id,
         "guid": str(metadata["guid"]),
@@ -3815,8 +4122,8 @@ def _source_only_article(metadata: dict[str, Any], parsed: ParsedArticle) -> dic
         "content_markdown": parsed.body,
         "paragraphs": paragraphs,
         "images": list(metadata.get("images") or []),
-        "image_placements": list(metadata.get("image_placements") or []),
-        "image_insights": [],
+        "image_placements": image_placements,
+        "image_insights": image_insights,
         "glossary_entries": [],
         "term_annotations": [],
         "glossary_analysis_complete": False,
@@ -3829,25 +4136,34 @@ def _source_only_article(metadata: dict[str, Any], parsed: ParsedArticle) -> dic
 def process_ft(
     cfg: dict[str, Any],
     *,
-    issue_date: str,
+    issue_date: str = "",
     preview_url: str = "",
     dry_run: bool = False,
     no_llm: bool = False,
     limit: int = 0,
     debug_data_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Archive one Financial Times PressReader issue."""
+    """Archive an explicit issue, or FT's latest available issue when omitted."""
     browser_cfg = cfg["browser"]
     page = open_browser(browser_cfg["user_data_path"], bool(browser_cfg.get("headless", False)))
     try:
-        activate_pressreader_entitlement(page, cfg)
+        entitlement_url = activate_pressreader_entitlement(page, cfg)
+        auto_latest = not issue_date
+        if auto_latest:
+            issue_date = _pressreader_issue_date_from_url(entitlement_url)
+            if not issue_date:
+                raise RuntimeError("FT ePaper 授权入口未返回可识别的最新期次日期")
+            preview_url = entitlement_url
+            log.info("自动模式使用 FT 当前最新期次: %s", issue_date)
         issue = discover_pressreader_issue(
             page,
             cfg,
             issue_date,
             preview_url=preview_url,
             debug_data_dir=debug_data_dir,
+            accept_date_redirect=auto_latest,
         )
+        issue_date = issue.issue_date
         existing = read_database_js()
         existing_guids = {
             str(article.get("guid") or "").strip()
@@ -3940,8 +4256,6 @@ def process_ft(
                         "published_at_local": "",
                         "updated_at_utc": "",
                         "archive_timezone": "",
-                        "image_placements": metadata["image_placements"],
-                        "image_insights": [],
                     })
                     persist(article)
 
@@ -4019,9 +4333,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="FT PressReader 报纸抓取、翻译与按期归档")
     p.add_argument(
         "--date",
-        default=datetime.now().date().isoformat(),
+        default="",
         metavar="YYYY-MM-DD",
-        help="PressReader 期次日期，默认今天",
+        help="指定 PressReader 期次日期；省略时抓取 FT 当前最新可用期次",
     )
     p.add_argument(
         "--preview-url",
@@ -4034,8 +4348,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=0, help="限制本次最多新增文章数(0=不限制)")
     p.add_argument("--refresh-glossary", action="store_true",
                    help="只按当前规则重新解析现有文章的中文关键词，不重抓或重译正文")
+    p.add_argument("--refresh-image-descriptions", action="store_true",
+                   help="只把现有来源 caption/alt text 回填为中文图片说明，不重抓正文")
     p.add_argument("--article-ids", default="",
-                   help="配合 --refresh-glossary，逗号分隔 article id；留空表示全部")
+                   help="配合刷新命令，逗号分隔 article id；留空表示全部")
     p.add_argument("--debug-data", default=None, metavar="DIR",
                    help="保存本次 PressReader 板块与卡片 JSON，便于排查")
     p.add_argument("--kill-stale", action="store_true",
@@ -4054,23 +4370,34 @@ def main() -> int:
         configured_database = str(cfg.get("paths", {}).get("database_js") or "").strip()
         if configured_database:
             DATABASE_JS = Path(configured_database).expanduser()
-        ok, error = validate_issue_date(args.date)
-        if not ok:
-            raise ValueError(error)
+        if args.date:
+            ok, error = validate_issue_date(args.date)
+            if not ok:
+                raise ValueError(error)
         if args.preview_url:
             requested_date = _pressreader_issue_date_from_url(args.preview_url)
-            if requested_date and requested_date != args.date:
+            if args.date and requested_date and requested_date != args.date:
                 raise ValueError(
                     f"--preview-url 日期 {requested_date} 与 --date {args.date} 不一致"
                 )
+            if not args.date and requested_date:
+                args.date = requested_date
         if args.rebuild_outputs:
             _sync_paper_outputs(cfg, read_database_js())
             return 0
         if args.kill_stale:
             _cleanup_stale_chrome_locks(cfg["browser"]["user_data_path"])
         if args.refresh_glossary:
+            if not args.date:
+                raise ValueError("--refresh-glossary 必须同时指定 --date")
             article_ids = {item.strip() for item in args.article_ids.split(",") if item.strip()}
             refresh_article_glossary(cfg, args.date, article_ids)
+            return 0
+        if args.refresh_image_descriptions:
+            if not args.date:
+                raise ValueError("--refresh-image-descriptions 必须同时指定 --date")
+            article_ids = {item.strip() for item in args.article_ids.split(",") if item.strip()}
+            refresh_image_descriptions(cfg, args.date, article_ids)
             return 0
         process_ft(
             cfg,
