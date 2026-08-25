@@ -162,6 +162,7 @@ DEFAULTS = {
     "browser": {
         "user_data_path": str(ROOT / ".ft-browser"),
         "headless": False,
+        "cookie_path": str(ROOT / ".ft-auth.json"),
     },
     "crawl": {
         "issue_base_url": PRESSREADER_ISSUE_BASE_URL,
@@ -246,7 +247,7 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
       FEISHU_WEBHOOK_URL → feishu.webhook_url
       DATABASE_JS_PATH / INDEX_HTML_PATH / INDEX_HTML_TEMPLATE → paths.*
       LLM_MAX_TOKENS / LLM_TEMPERATURE / LLM_TIMEOUT_S → llm.*
-      BROWSER_USER_DATA_PATH / BROWSER_HEADLESS → browser.*
+      BROWSER_USER_DATA_PATH / BROWSER_HEADLESS / FT_COOKIE_PATH → browser.*
       FT_PREVIEW_BASE_URL / FT_EPAPER_ACCESS_URL / PRESSREADER_LOAD_TIMEOUT_S → crawl.*
 
     设计:DEFAULTS 提供结构化默认值,所有真实配置在 .env 里覆盖,不入库。
@@ -269,6 +270,7 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
         "feishu.webhook_url": src.get("FEISHU_WEBHOOK_URL", "").strip(),
         "browser.user_data_path": src.get("BROWSER_USER_DATA_PATH", "").strip(),
         "browser.headless": src.get("BROWSER_HEADLESS", "").strip().lower() in ("1", "true", "yes"),
+        "browser.cookie_path": src.get("FT_COOKIE_PATH", "").strip(),
         "crawl.issue_base_url": src.get("FT_PREVIEW_BASE_URL", "").strip(),
         "crawl.epaper_access_url": src.get("FT_EPAPER_ACCESS_URL", "").strip(),
         "crawl.load_timeout_s": src.get("PRESSREADER_LOAD_TIMEOUT_S", "").strip(),
@@ -354,20 +356,23 @@ def read_database_js(path: Path | None = None) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
-    # 抓最后一个赋值(避免注释里出现相同模式)。
-    matches = list(re.finditer(r"window\.economist_db\s*=\s*(\[[\s\S]*?\])\s*;", text))
+    # 抓最后一个赋值(避免注释里出现相同模式)，再交给 JSON decoder
+    # 解析完整数组；正文字符串中可能合法出现 `];`。
+    matches = list(re.finditer(r"window\.economist_db\s*=\s*", text))
     if not matches:
         log.warning("database.js 格式异常,按空数组处理")
         return []
-    raw = matches[-1].group(1)
+    raw = text[matches[-1].end():].lstrip()
     if not raw.strip() or raw.strip() == "[]":
         return []
-    return json.loads(raw)
+    data, _ = json.JSONDecoder().raw_decode(raw)
+    return data
 
 
 def _serialize_for_js(obj: Any) -> str:
-    """用 JSON 序列化,再用 _js_escape 保护 JS 字符串。"""
-    return json.dumps(obj, ensure_ascii=False, indent=2)
+    """用 JSON 序列化,并避免正文里的 ``];`` 误伤 database.js 读取正则。"""
+    serialized = json.dumps(obj, ensure_ascii=False, indent=2)
+    return re.sub(r"\](\s*);", lambda m: "]" + m.group(1) + "\\u003b", serialized)
 
 
 def write_database_js(
@@ -1728,6 +1733,75 @@ def activate_pressreader_entitlement(page: Any, cfg: dict[str, Any]) -> str:
     )
     log.info("FT ePaper 授权已激活: %s", resolved_url)
     return resolved_url
+
+
+def save_ft_cookies(page: Any, cookie_path: Path) -> None:
+    """把当前浏览器 Cookie 保存为仅当前用户可读的 JSON 备份。"""
+    rows = page.cookies(all_domains=True, all_info=True) or []
+    if not isinstance(rows, list) or not rows:
+        return
+    cookie_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_atomic_text(cookie_path, json.dumps(rows, ensure_ascii=False, indent=2) + "\n")
+    os.chmod(cookie_path, 0o600)
+
+
+def _cookie_for_drissionpage(c: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": c["name"],
+        "value": c["value"],
+        "domain": c.get("domain") or ".ft.com",
+        "path": c.get("path") or "/",
+    }
+    exp = c.get("expirationDate") or c.get("expires") or c.get("expiry")
+    if isinstance(exp, (int, float)) and exp > 0:
+        payload["expires"] = int(exp)
+    if c.get("secure"):
+        payload["secure"] = True
+    if c.get("httpOnly"):
+        payload["httpOnly"] = True
+    return payload
+
+
+def load_ft_cookies(page: Any, cookie_path: Path) -> int:
+    if not cookie_path.exists():
+        return 0
+    data = json.loads(cookie_path.read_text(encoding="utf-8"))
+    rows = data if isinstance(data, list) else [data]
+    payload = [
+        _cookie_for_drissionpage(row)
+        for row in rows
+        if isinstance(row, dict) and row.get("name") and row.get("value") is not None
+    ]
+    if not payload:
+        return 0
+    page.get("https://www.ft.com/")
+    time.sleep(1.0)
+    page.set.cookies(payload)
+    log.info("已从本地加载 %d 个 FT Cookie", len(payload))
+    return len(payload)
+
+
+def login_ft(cfg: dict[str, Any]) -> bool:
+    """Open the project Chromium profile for a manual FT login, then persist cookies."""
+    browser_cfg = cfg["browser"]
+    page = open_browser(browser_cfg["user_data_path"], False)
+    cookie_path = Path(browser_cfg["cookie_path"]).expanduser()
+    try:
+        load_ft_cookies(page, cookie_path)
+        access_url = str(cfg["crawl"].get("epaper_access_url") or FT_EPAPER_ACCESS_URL).strip()
+        page.get(access_url)
+        log.info("请在 Chromium 中完成 FT 登录，并确认 Digital Edition / PressReader 可访问。")
+        if sys.stdin.isatty():
+            input("完成后按 Enter 保存 Cookie 并验证 PressReader 授权：")
+        resolved_url = activate_pressreader_entitlement(page, cfg)
+        save_ft_cookies(page, cookie_path)
+        log.info("FT 登录验证成功：%s；Cookie 已保存到 %s", resolved_url, cookie_path)
+        return True
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
 
 
 def _clean_pressreader_text(value: Any) -> str:
@@ -3818,8 +3892,11 @@ def process_ft(
     """Archive an explicit issue, or FT's latest available issue when omitted."""
     browser_cfg = cfg["browser"]
     page = open_browser(browser_cfg["user_data_path"], bool(browser_cfg.get("headless", False)))
+    cookie_path = Path(browser_cfg["cookie_path"]).expanduser()
     try:
+        load_ft_cookies(page, cookie_path)
         entitlement_url = activate_pressreader_entitlement(page, cfg)
+        save_ft_cookies(page, cookie_path)
         auto_latest = not issue_date
         if auto_latest:
             issue_date = _pressreader_issue_date_from_url(entitlement_url)
@@ -4015,6 +4092,7 @@ def parse_args() -> argparse.Namespace:
         help="可选的 PressReader 日期入口；留空时按 --date 自动构造",
     )
     p.add_argument("--dry-run", action="store_true", help="只列出尚未归档的候选文章")
+    p.add_argument("--login", action="store_true", help="打开独立 Chromium，人工登录 FT 并保存 Cookie")
     p.add_argument("--no-llm", action="store_true",
                    help="抓取并保存英文原文和图片，不翻译或生成 glossary")
     p.add_argument("--limit", type=int, default=0, help="限制本次最多新增文章数(0=不限制)")
@@ -4057,6 +4135,9 @@ def main() -> int:
             return 0
         if args.kill_stale:
             _cleanup_stale_chrome_locks(cfg["browser"]["user_data_path"])
+        if args.login:
+            login_ft(cfg)
+            return 0
         if args.refresh_glossary:
             if not args.date:
                 raise ValueError("--refresh-glossary 必须同时指定 --date")

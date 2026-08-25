@@ -132,14 +132,21 @@ class PressReaderSourceTests(unittest.TestCase):
             "",
             [],
         )
-        cfg = {"browser": {"user_data_path": "/tmp/ft-test", "headless": True}}
-        with (
-            patch("sync_ft.open_browser", return_value=page),
-            patch("sync_ft.activate_pressreader_entitlement", return_value=entitlement_url),
-            patch("sync_ft.discover_pressreader_issue", return_value=issue) as discover,
-            patch("sync_ft.read_database_js", return_value=[]),
-        ):
-            self.assertEqual(process_ft(cfg, dry_run=True), [])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cfg = {
+                "browser": {
+                    "user_data_path": "/tmp/ft-test",
+                    "headless": True,
+                    "cookie_path": str(Path(temp_dir) / "cookies.json"),
+                }
+            }
+            with (
+                patch("sync_ft.open_browser", return_value=page),
+                patch("sync_ft.activate_pressreader_entitlement", return_value=entitlement_url),
+                patch("sync_ft.discover_pressreader_issue", return_value=issue) as discover,
+                patch("sync_ft.read_database_js", return_value=[]),
+            ):
+                self.assertEqual(process_ft(cfg, dry_run=True), [])
 
         self.assertEqual(discover.call_args.args[2], "2026-08-22")
         self.assertEqual(discover.call_args.kwargs["preview_url"], entitlement_url)
@@ -256,6 +263,19 @@ class FTStorageTests(unittest.TestCase):
             rows = read_database_js(path)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["section"], "FRONT PAGE")
+
+    def test_database_round_trips_close_bracket_semicolon_in_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "database.js"
+            record = self._record()
+            record["content_markdown"] = "The target was [oil trade]; then logistics."
+            write_database_js([record], path)
+            rows = read_database_js(path)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(
+                rows[0]["content_markdown"],
+                "The target was [oil trade]; then logistics.",
+            )
 
     def test_daily_article_keeps_empty_page_and_media_metadata(self) -> None:
         normalized = _normalise_paper_article(self._record(), 1)

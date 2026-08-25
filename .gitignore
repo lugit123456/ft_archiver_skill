@@ -1,4 +1,5 @@
 .env
+.ft-auth.json
 .ft-browser/
 .ft-sync.lock
 
