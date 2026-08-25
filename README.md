@@ -80,7 +80,7 @@ python sync_ft.py --rebuild-outputs
 - `paragraphs`：按原始顺序保存的 `body`/`crosshead` 节点及中英对照。
 - `images`：本地图片路径或下载失败时的原始 URL。
 - `image_placements`：图片位置、原始 caption、credit 与 alt text。
-- `image_insights`：按图片 path 保存 `image_type` 和中文 `description`；说明只翻译来源提供的 caption/alt，不根据图片猜测。
+- `image_insights`：为兼容旧数据库保留的字段；新归档固定为空，不解析图片，也不生成或翻译图片说明。
 
 图片位置规则：
 
@@ -88,7 +88,12 @@ python sync_ft.py --rebuild-outputs
 - 正文 `figure` 按 DOM 顺序标记为 `after_paragraph`。
 - 无法可靠确定位置时标记为 `unlocated`，前端放在文末。
 - PressReader 没有提供 caption、credit 或 alt 时对应字段保持为空，不猜测。
-- 中英对照区域只显示中文图片说明；使用 `--refresh-image-descriptions --date YYYY-MM-DD` 可为历史数据回填。
+- 前端只显示图片本身，不显示图片分析、caption、credit 或 alt text。
+
+专有名词翻译规则：
+
+- 人名、公司名、机构名、品牌、平台、App、网站、产品和出版物名称保留英文原文，不音译、意译或替换成中文别称。
+- 例如使用 `Google`、`Reddit`、`Instagram`、`TikTok`、`Sensor Tower`，不使用“谷歌”“红迪”“照片墙”“抖音海外版”“传感器塔”。
 
 ## 输出
 

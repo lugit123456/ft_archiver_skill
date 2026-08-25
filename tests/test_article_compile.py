@@ -78,9 +78,12 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertIn("不写摘要", translation_prompt)
         self.assertIn("不是专名", translation_prompt)
         self.assertIn("不机械写成", translation_prompt)
+        self.assertIn("必须写 Google、Reddit、Instagram、TikTok、Sensor Tower", translation_prompt)
+        self.assertIn("不得写“谷歌”“红迪”“照片墙”“抖音海外版”“传感器塔”", translation_prompt)
         self.assertNotIn('"summary_md"', translation_prompt)
         self.assertIn("这不是逐段翻译", summary_prompt)
         self.assertIn("政治和外交语境", summary_prompt)
+        self.assertIn("必须写 Google、Reddit、Instagram、TikTok、Sensor Tower", summary_prompt)
         self.assertNotIn('"paragraphs":', summary_prompt)
         self.assertEqual(article["title_zh"], "自然中文标题")
         self.assertEqual(article["summary_md"], summary)
@@ -124,16 +127,10 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertIn("忠实翻译全文", completions.requests[1]["messages"][0]["content"])  # type: ignore[index]
         self.assertIn("原创编辑稿", completions.requests[2]["messages"][0]["content"])  # type: ignore[index]
 
-    def test_source_image_description_is_translated_without_replacing_metadata(self) -> None:
+    def test_source_image_metadata_is_preserved_without_image_llm_request(self) -> None:
         client, completions = _client([
             {"paragraphs": [{"zh_text": "正文译文。", "role": "body"}]},
             {"title_zh": "中文标题", "summary_md": _natural_summary()},
-            {
-                "images": [{
-                    "index": 1,
-                    "description": "伦敦金融城，生产率提升有助于缓解公共财政压力。",
-                }],
-            },
         ])
         placement = {
             "path": "images/example.jpg",
@@ -160,21 +157,16 @@ class ArticleCompileTests(unittest.TestCase):
 
         self.assertIsNotNone(article)
         assert article is not None
-        self.assertEqual(len(completions.requests), 3)
+        self.assertEqual(len(completions.requests), 2)
         stored_placement = article["image_placements"][0]
         self.assertEqual(stored_placement["alt_text"], placement["alt_text"])
         self.assertEqual(stored_placement["credit"], "FT")
         self.assertNotIn("description_zh", stored_placement)
-        stored_insight = article["image_insights"][0]
-        self.assertEqual(stored_insight["path"], placement["path"])
-        self.assertEqual(
-            stored_insight["description"],
-            "伦敦金融城，生产率提升有助于缓解公共财政压力。",
-        )
+        self.assertEqual(article["image_insights"], [])
         self.assertNotIn("description_zh", placement)
         self.assertTrue(article["compiled_article"])
 
-    def test_existing_chinese_image_description_needs_no_extra_request(self) -> None:
+    def test_existing_chinese_caption_is_not_promoted_to_image_insight(self) -> None:
         client, completions = _client([
             {"paragraphs": [{"zh_text": "正文译文。", "role": "body"}]},
             {"title_zh": "中文标题", "summary_md": _natural_summary()},
@@ -202,10 +194,7 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertIsNotNone(article)
         assert article is not None
         self.assertEqual(len(completions.requests), 2)
-        self.assertEqual(
-            article["image_insights"][0]["description"],
-            "伦敦金融城资料照片",
-        )
+        self.assertEqual(article["image_insights"], [])
         self.assertNotIn("description_zh", article["image_placements"][0])
 
     def test_summary_length_expands_with_source_size(self) -> None:

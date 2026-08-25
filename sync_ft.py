@@ -113,6 +113,7 @@ SUMMARY_SYSTEM_PROMPT: str = """\
 2. 严禁遗漏任何核心论点和数据(数字、人物、机构名、年份)。
 3. 严禁引入原文外的信息。
 4. 若原文涉及争议,保留双方观点,标注来源。
+5. 人名、公司名、机构名、品牌、平台、App、网站、产品和出版物名称保留英文原文，不音译、意译或替换成中文别称。例如使用 Google、Reddit、Instagram、TikTok、Sensor Tower。
 
 严格按以下 Markdown 格式输出(不可增删章节):
 
@@ -2276,111 +2277,6 @@ def materialize_issue_cover(
         return ""
 
 
-def analyze_article_images(
-    client: Any,
-    cfg: dict[str, Any],
-    issue_date: str,
-    title: str,
-    images: list[str],
-    log_: logging.Logger,
-) -> list[dict[str, Any]]:
-    """用 .env LLM 对正文图片/图表做 50-80 字中文简析。"""
-    settings = cfg["image_analysis"]
-    if not settings.get("enabled") or not images:
-        return []
-    output_root = _paper_output_root(cfg)
-    content: list[dict[str, Any]] = [{
-        "type": "text",
-        "text": (
-            "请逐张分析下面文章中的图片或图表。每张只写一段 50-80 个中文字符的简短说明，"
-            "说明画面/图表展示的内容及其与文章的关系；不要编造图片中看不出的数字或事实。"
-            "返回严格 JSON，不要 Markdown。格式："
-            '{"images":[{"index":1,"image_type":"photo|chart|cartoon|illustration",'
-            '"description":"50-80字中文简析"}]}\n文章标题：' + title
-        ),
-    }]
-    usable_images = images[: max(1, int(settings["max_images"]))]
-    for image_path in usable_images:
-        if image_path.startswith("images/"):
-            local_path = output_root / PAPER_PUBLICATION_TYPE / issue_date / image_path
-            try:
-                import base64
-                import mimetypes
-                mime = mimetypes.guess_type(local_path.name)[0] or "image/jpeg"
-                data = base64.b64encode(local_path.read_bytes()).decode("ascii")
-                image_url = f"data:{mime};base64,{data}"
-            except Exception as exc:
-                log_.warning(f"读取本地图片失败，跳过解析 {image_path}: {exc}")
-                continue
-        elif _is_article_image_url(image_path):
-            image_url = image_path
-        else:
-            continue
-        content.append({"type": "image_url", "image_url": {"url": image_url, "detail": "low"}})
-
-    if len(content) == 1:
-        return []
-    model = settings.get("model") or cfg["llm"].get("model", "gpt-4o-mini")
-    for attempt in range(int(settings["max_retries"]) + 1):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "你是严谨的图片与数据图表编辑，只返回 JSON。"},
-                    {"role": "user", "content": content},
-                ],
-                max_tokens=int(settings["max_tokens"]),
-                temperature=0.2,
-                response_format={"type": "json_object"},
-            )
-            raw = _extract_json_payload(response.choices[0].message.content or "")
-            raw_items = (
-                raw.get("images")
-                or raw.get("image_insights")
-                or raw.get("analyses")
-                or raw.get("items")
-                or []
-            )
-            if not isinstance(raw_items, list):
-                raise ValueError("图片解析结果不是 images 数组")
-            insights: list[dict[str, Any]] = []
-            for item in raw_items:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    index = int(item.get("index") or item.get("image_index") or item.get("image_number") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if index == 0 and len(usable_images) == 1:
-                    index = 1
-                description = str(
-                    item.get("description") or item.get("analysis") or item.get("caption") or ""
-                ).strip()
-                if 35 <= count_cn_chars(description) < 50:
-                    description += "，帮助读者把握文章所讨论的背景与变化。"
-                if not (1 <= index <= len(usable_images)) or not (50 <= count_cn_chars(description) <= 80):
-                    continue
-                image_type = str(item.get("image_type") or "illustration").strip().lower()
-                if image_type not in {"photo", "chart", "cartoon", "illustration"}:
-                    image_type = "illustration"
-                insights.append({
-                    "path": usable_images[index - 1],
-                    "image_type": image_type,
-                    "description": description,
-                })
-            if insights:
-                return insights
-            raise ValueError(
-                "图片解析结果没有合格的 50-80 字说明: "
-                + json.dumps(raw, ensure_ascii=False)[:500]
-            )
-        except Exception as exc:
-            log_.warning(f"图片解析失败 (attempt {attempt + 1}): {exc}")
-            if not _should_retry_llm_error(exc, attempt, int(settings["max_retries"])):
-                break
-    return []
-
-
 def _parse_article_html(html: str) -> tuple[str, str]:
     """从文章页 HTML 中抽 (title, content_raw)。
 
@@ -2750,7 +2646,7 @@ def _glossary_prompt(
     if only_candidates:
         selection_rule = """This is a coverage-repair request. Return entries only for the listed candidates. Every listed item has already passed a proper-name detector: include each one unless it is unmistakably ordinary vocabulary. Do not omit a person or other named entity merely because it is famous or obvious."""
     else:
-        selection_rule = """Review every listed candidate individually. Include every actual named person, organization, company, law or policy, event, place, work, publication, project, mechanism, or acronym. A transliterated Chinese name followed by its English spelling in parentheses is always a high-priority person/name and must be included. The candidate list is a coverage floor, not the full set: also add other useful English proper terms visible in the Chinese column."""
+        selection_rule = """Review every listed candidate individually. Include every actual named person, organization, company, law or policy, event, place, work, publication, project, mechanism, or acronym. English names deliberately retained in the Chinese column are high-priority candidates. The candidate list is a coverage floor, not the full set: also add other useful English proper terms visible in the Chinese column."""
 
     return f"""You are a senior English-Chinese translator and global political-economic background editor. Analyze the bilingual article and return at most {max_terms} English-language proper terms that need contextual explanation for a Chinese reader.
 
@@ -2763,7 +2659,7 @@ Candidates extracted from the Chinese column:
 
 Allowed types only: person, organization, company, policy_law, event, place_context, work, proper_concept, acronym.
 For every selected term:
-- term must be the canonical English name and term_zh its conventional Chinese name.
+- term must be the canonical English name. For a person, company, organization, brand, platform, app, website, product, or publication, keep term_zh empty and use the exact English name throughout description_zh; never introduce a transliterated, translated, or colloquial Chinese alias. For other term types, term_zh may contain a conventional Chinese name.
 - For an extracted candidate, term must copy that candidate's English surface exactly apart from letter case. Put expansions or aliases in description_zh, never substitute a different canonical name.
 - description_zh must be an objective Chinese introduction of roughly 100-200 Chinese characters. State both who/what it is and its role or relevant background in this article. Do not invent facts.
 - occurrences may contain only the first useful occurrence in the Chinese column.
@@ -2780,7 +2676,7 @@ Return JSON ONLY:
   "terms": [
     {{
       "term": "Jerome Powell",
-      "term_zh": "杰罗姆·鲍威尔",
+      "term_zh": "",
       "type": "person",
       "description_zh": "100-200字中文介绍",
       "occurrences": [
@@ -3101,8 +2997,8 @@ def _translation_prompt(
 2. 使用自然、清楚的现代中文，不逐词照搬英文语序。主动拆开过长的英文句子，补足中文所需的主语和逻辑连接，使每句话都能独立读懂。
 3. 根据上下文意译习语、隐喻和抽象表达，避免“降低杠杆”“使其过时”一类脱离中文语境的机械直译。
 4. 保持段落顺序和数量完全一致，每个输入段落必须有且只有一个对应译文，不得合并、拆分或遗漏。
-5. crosshead 译成简短自然的中文小标题；body 译成正文；caption 译成图片说明；table 保持 Markdown 表格的行列和分隔符结构。
-6. 每个具体人物、组织、公司、政策或法律、事件、地点、作品、出版物、项目及缩写第一次出现时，在中文名称后用全角括号保留规范英文原文；后续不必重复。“海湾国家（Gulf states）”这类泛称不是专名，不要添加英文括注。
+5. crosshead 译成简短自然的中文小标题；body 译成正文；table 保持 Markdown 表格的行列和分隔符结构。图片及图片说明不进入翻译流程。
+6. 人名、公司名、机构名、品牌、平台、App、网站、产品和出版物名称必须保留英文原文，不音译、意译、不替换成中文别称，也不要写成“中文名（English）”。例如必须写 Google、Reddit、Instagram、TikTok、Sensor Tower，不得写“谷歌”“红迪”“照片墙”“抖音海外版”“传感器塔”。政策、法律、事件、地点等其他专名可使用自然中文，但第一次出现时在中文名称后用全角括号保留规范英文原文。“海湾国家（Gulf states）”这类泛称不是专名，不要添加英文括注。
 7. Mr、Mrs、Ms、Dr 等英文称谓通常只译人名，不机械写成“先生”“女士”或“博士”；只有称谓本身影响语义时才保留。
 8. 不写摘要、评论、说明或 Markdown 代码块。
 
@@ -3161,6 +3057,7 @@ def _summary_prompt(
 6. 对争议性判断明确归属于文章、相关国家或相关人物，不把观点写成未经限定的事实。
 7. summary_md 使用 {min_cn_chars}-{max_cn_chars} 个汉字。文章较长时已经放宽上限，应利用额外篇幅讲清逻辑，而不是让句子变得更长。返回前自行检查，但不要输出字数。
 8. title_zh 应简洁、自然、准确，避免逐词翻译造成歧义。政治和外交语境中的 deal 通常译为“协议”或“安排”，不要写成“交易”“谈一笔交易”等商业化表达。
+9. title_zh 和 summary_md 中的人名、公司名、机构名、品牌、平台、App、网站、产品和出版物名称必须保留英文原文，不音译、意译或替换成中文别称。例如必须写 Google、Reddit、Instagram、TikTok、Sensor Tower，不得写“谷歌”“红迪”“照片墙”“抖音海外版”“传感器塔”。
 
 Title: {title}
 Section: {section}
@@ -3223,7 +3120,8 @@ def _request_article_translation(
                         "role": "system",
                         "content": (
                             "只返回 JSON。忠实翻译全文，但必须使用自然、清楚的现代中文，"
-                            "不得逐词照搬英文句法。"
+                            "不得逐词照搬英文句法。人名、公司名、机构名、品牌、平台、App、"
+                            "网站、产品和出版物名称必须保留英文原文。"
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -3260,11 +3158,6 @@ def _request_article_translation(
             time.sleep(1.0)
 
     raise last_error or RuntimeError("逐段翻译失败")
-
-
-def _image_description_source(item: dict[str, Any]) -> str:
-    """Return source-provided image copy only; never infer a description."""
-    return _clean_pressreader_text(item.get("caption") or item.get("alt_text"))
 
 
 def _migrate_image_description_fields(
@@ -3311,141 +3204,6 @@ def _migrate_image_description_fields(
             insight["description"] = description
             insight.setdefault("image_type", "photo")
     return placements, insights
-
-
-def _set_image_insight_description(
-    image_insights: list[dict[str, Any]], path: str, description: str,
-) -> None:
-    for insight in image_insights:
-        if str(insight.get("path") or "") == path:
-            insight["description"] = description
-            insight.setdefault("image_type", "photo")
-            return
-    image_insights.append({
-        "path": path,
-        "image_type": "photo",
-        "description": description,
-    })
-
-
-def _image_description_translation_prompt(
-    title: str,
-    items: list[tuple[int, str]],
-) -> str:
-    rendered = "\n".join(f"{index}. {text}" for index, text in items)
-    return f"""你是一名资深英中新闻图片编辑。请把下面由来源网站提供的英文图片说明翻译成自然、准确、便于中文读者快速浏览的中文，只返回严格 JSON。
-
-要求：
-1. 忠实保留人物、地点、时间、事实、引语和图片方位信息，不补充原文没有的内容。
-2. 使用自然中文，不逐词照搬英文语序；人名、机构名和地名按新闻编辑规范处理。
-3. 保持输入数量和 index 完全一致，不合并、不遗漏。
-4. 不写分析、评论、Markdown 或“图片显示”等额外套话。
-
-Article title: {title}
-
-Source image descriptions:
-{rendered}
-
-Return JSON in this shape:
-{{
-  "images": [
-    {{"index": 1, "description": "中文图片说明"}}
-  ]
-}}
-"""
-
-
-def _translate_image_placement_descriptions(
-    client: Any,
-    cfg: dict[str, Any],
-    *,
-    title: str,
-    image_placements: list[dict[str, Any]],
-    image_insights: list[dict[str, Any]] | None,
-    log_: logging.Logger,
-) -> list[dict[str, Any]]:
-    """Translate source captions/alt text into image_insights descriptions."""
-    placements, insights = _migrate_image_description_fields(
-        image_placements, image_insights,
-    )
-    described_paths = {
-        str(item.get("path") or "")
-        for item in insights
-        if _clean_pressreader_text(item.get("description"))
-    }
-    for item in placements:
-        path = str(item.get("path") or "").strip()
-        source = _image_description_source(item)
-        if path and source and count_cn_chars(source) > 0 and path not in described_paths:
-            _set_image_insight_description(insights, path, source)
-            described_paths.add(path)
-    targets = [
-        (index, _image_description_source(item))
-        for index, item in enumerate(placements, start=1)
-        if str(item.get("path") or "").strip() not in described_paths
-        if _image_description_source(item)
-        and count_cn_chars(_image_description_source(item)) == 0
-    ]
-    if not targets:
-        return insights
-
-    llm = cfg["llm"]
-    prompt = _image_description_translation_prompt(title, targets)
-    max_retries = int(cfg["crawl"].get("max_retries", 2))
-    max_tokens = max(int(llm.get("max_tokens", 2048)), 1024)
-    expected_indexes = {index for index, _ in targets}
-    last_error: Exception | None = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.chat.completions.create(
-                model=llm.get("model", "gpt-4o-mini"),
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "只返回 JSON。忠实翻译来源网站提供的图片说明，不得推测图片内容。",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=max_tokens,
-                temperature=min(float(llm.get("temperature", 0.4)), 0.2),
-                response_format={"type": "json_object"},
-            )
-            payload = _extract_json_payload(response.choices[0].message.content or "")
-            raw_items = payload.get("images")
-            if not isinstance(raw_items, list):
-                raise LLMOutputValidationError("图片说明翻译结果不是 images 数组")
-            translated: dict[int, str] = {}
-            for item in raw_items:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    index = int(item.get("index") or 0)
-                except (TypeError, ValueError):
-                    continue
-                description = _clean_pressreader_text(
-                    item.get("description") or item.get("description_zh")
-                )
-                if index in expected_indexes and description and count_cn_chars(description) > 0:
-                    translated[index] = description
-            if set(translated) != expected_indexes:
-                missing = sorted(expected_indexes - set(translated))
-                raise LLMOutputValidationError(
-                    "图片说明翻译存在遗漏: " + ", ".join(map(str, missing))
-                )
-            for index, description in translated.items():
-                path = str(placements[index - 1].get("path") or "").strip()
-                if path:
-                    _set_image_insight_description(insights, path, description)
-            return insights
-        except Exception as exc:
-            last_error = exc
-            log_.warning(f"图片说明翻译失败 (attempt {attempt + 1}): {exc}")
-            if not _should_retry_llm_error(exc, attempt, max_retries):
-                break
-            time.sleep(1.0)
-
-    raise last_error or RuntimeError("图片说明翻译失败")
 
 
 def _request_article_summary(
@@ -3593,18 +3351,6 @@ def compile_article_record(
         title_zh = ""
         summary_md = summarize(client, cfg, title, body, log_)
 
-    try:
-        compiled_image_insights = _translate_image_placement_descriptions(
-            client,
-            cfg,
-            title=title,
-            image_placements=compiled_image_placements,
-            image_insights=compiled_image_insights,
-            log_=log_,
-        )
-    except Exception as exc:
-        log_.error(f"图片说明翻译最终失败，保留英文元数据但前端不展示: {title} ({exc})")
-
     compile_complete = translation_error is None and summary_error is None
     article = {
         "id": article_id,
@@ -3714,10 +3460,6 @@ def _compile_article_task(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[
     )
 
 
-def _analyze_article_images_task(cfg: dict[str, Any], issue_date: str, title: str, images: list[str]) -> list[dict[str, Any]]:
-    return analyze_article_images(make_llm_client(cfg), cfg, issue_date, title, images, log)
-
-
 def process_issue(
     cfg: dict[str, Any],
     issue_date: str,
@@ -3728,13 +3470,12 @@ def process_issue(
     no_feishu: bool = False,
     debug_html_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """抓一个 issue。浏览器串行，正文编译和图片解析由独立 LLM 队列并发完成。"""
+    """抓一个 issue。浏览器串行，正文编译由独立 LLM 队列并发完成。"""
     browser_cfg = cfg["browser"]
     delay_min = float(cfg["crawl"].get("delay_min_s", 5))
     delay_max = float(cfg["crawl"].get("delay_max_s", 10))
     pipeline = cfg["pipeline"]
     compile_workers = max(1, int(pipeline.get("compile_workers", 2)))
-    image_workers = max(1, int(pipeline.get("image_workers", 1)))
     max_pending = max(compile_workers, int(pipeline.get("max_pending", compile_workers * 2)))
 
     log.info(f"启动浏览器 (user_data={browser_cfg['user_data_path']})")
@@ -3767,13 +3508,14 @@ def process_issue(
         log.info(
             f"开始逐篇抓取(已存在 {len(existing_by_url)} 篇,本 issue 可抓取 {len(candidates)} 条"
             f"{f', 本 run 最多新增 {limit} 篇' if limit > 0 else ''}; "
-            f"正文 LLM {compile_workers} 路, 图片 LLM {image_workers} 路)"
+            f"正文 LLM {compile_workers} 路)"
         )
 
-        with ThreadPoolExecutor(max_workers=compile_workers, thread_name_prefix="econ-compile") as compile_pool, \
-                ThreadPoolExecutor(max_workers=image_workers, thread_name_prefix="econ-image") as image_pool:
+        with ThreadPoolExecutor(
+            max_workers=compile_workers,
+            thread_name_prefix="econ-compile",
+        ) as compile_pool:
             pending_compile: dict[Future, dict[str, Any]] = {}
-            pending_images: dict[Future, dict[str, Any]] = {}
 
             def persist_article(article: dict[str, Any]) -> None:
                 existing.append(article)
@@ -3786,15 +3528,6 @@ def process_issue(
                         f"(本 run 第 {len(new_articles)} 篇 / 累计 {len(existing)} 篇)"
                     )
                     _maybe_export_article_md(cfg, article)
-                    if cfg["image_analysis"].get("enabled") and article.get("images"):
-                        future = image_pool.submit(
-                            _analyze_article_images_task,
-                            cfg,
-                            issue_date,
-                            str(article.get("title") or ""),
-                            list(article["images"]),
-                        )
-                        pending_images[future] = article
                 except Exception as exc:
                     log.error(f"写盘失败 {article.get('url')}:{exc},该篇未持久化")
                     existing.pop()
@@ -3819,29 +3552,8 @@ def process_issue(
                     if article:
                         persist_article(article)
 
-            def drain_images(block: bool) -> None:
-                if not pending_images:
-                    return
-                done, _ = wait(
-                    pending_images,
-                    timeout=None if block else 0,
-                    return_when=FIRST_COMPLETED,
-                )
-                for future in done:
-                    article = pending_images.pop(future)
-                    try:
-                        article["image_insights"] = future.result()
-                        write_database_js(existing, authoritative=True)
-                        log.info(
-                            f"[images] 已解析 {article['id']}: "
-                            f"{len(article.get('image_insights') or [])} 条图片说明"
-                        )
-                    except Exception as exc:
-                        log.warning(f"图片解析任务失败 {article.get('url')}: {exc}")
-
             for cand in candidates:
                 drain_compiled(block=False)
-                drain_images(block=False)
                 while limit > 0 and len(new_articles) + len(pending_compile) >= limit:
                     drain_compiled(block=True)
                     if len(new_articles) >= limit:
@@ -3885,9 +3597,6 @@ def process_issue(
 
             while pending_compile:
                 drain_compiled(block=True)
-                drain_images(block=False)
-            while pending_images:
-                drain_images(block=True)
 
         try:
             _sync_paper_outputs(cfg, existing, issue_date=issue_date, issue_covers={issue_date: cover_image})
@@ -3911,7 +3620,7 @@ def process_issue(
 def refresh_article_images(
     cfg: dict[str, Any], issue_date: str, article_ids: set[str], no_feishu: bool = True,
 ) -> list[dict[str, Any]]:
-    """只刷新指定文章的正文图片和图片解析，不重新抓取或翻译正文。"""
+    """只刷新指定文章的正文图片，不解析图片，也不重新抓取或翻译正文。"""
     existing = read_database_js()
     targets = [
         article for article in existing
@@ -3923,7 +3632,6 @@ def refresh_article_images(
         return []
 
     page = open_browser(cfg["browser"]["user_data_path"], bool(cfg["browser"].get("headless", False)))
-    client = make_llm_client(cfg)
     refreshed: list[dict[str, Any]] = []
     try:
         for article in targets:
@@ -3933,13 +3641,11 @@ def refresh_article_images(
                 article["images"] = materialize_article_images(
                     image_urls, cfg, issue_date, str(article.get("id") or "article")
                 )
-                article["image_insights"] = analyze_article_images(
-                    client, cfg, issue_date, str(article.get("title") or ""), article["images"], log
-                )
+                article["image_insights"] = []
                 refreshed.append(article)
                 log.info(
                     f"[images] 已刷新 {article.get('id')}: "
-                    f"{len(article['images'])} 张图片, {len(article['image_insights'])} 条解析"
+                    f"{len(article['images'])} 张图片"
                 )
             except Exception as exc:
                 log.warning(f"[images] 刷新失败 {url}: {exc}")
@@ -3993,85 +3699,6 @@ def refresh_article_glossary(
 
     if refreshed:
         write_database_js(existing, authoritative=True)
-        _sync_paper_outputs(cfg, existing, issue_date=issue_date)
-        _maybe_rebuild_index(cfg)
-    return refreshed
-
-
-def refresh_image_descriptions(
-    cfg: dict[str, Any], issue_date: str, article_ids: set[str],
-) -> list[dict[str, Any]]:
-    """Backfill Chinese descriptions from stored source captions/alt text."""
-    existing = read_database_js()
-    targets: list[dict[str, Any]] = []
-    for article in existing:
-        if article.get("issue_date") != issue_date:
-            continue
-        if article_ids and article.get("id") not in article_ids:
-            continue
-        placements = list(article.get("image_placements") or [])
-        _, migrated_insights = _migrate_image_description_fields(
-            placements, list(article.get("image_insights") or []),
-        )
-        described_paths = {
-            str(item.get("path") or "")
-            for item in migrated_insights
-            if _clean_pressreader_text(item.get("description"))
-        }
-        has_legacy_fields = any(
-            isinstance(item, dict)
-            and ("description_zh" in item or "caption_zh" in item)
-            for item in placements
-        )
-        has_untranslated_source = any(
-            isinstance(item, dict)
-            and str(item.get("path") or "").strip() not in described_paths
-            and bool(_image_description_source(item))
-            for item in placements
-        )
-        if has_legacy_fields or has_untranslated_source:
-            targets.append(article)
-    if not targets:
-        log.info(f"没有需要回填中文图片说明的文章: issue={issue_date}, ids={sorted(article_ids)}")
-        return []
-
-    client: Any = None
-    refreshed: list[dict[str, Any]] = []
-    for article in targets:
-        try:
-            placements, insights = _migrate_image_description_fields(
-                list(article.get("image_placements") or []),
-                list(article.get("image_insights") or []),
-            )
-            described_paths = {
-                str(item.get("path") or "")
-                for item in insights
-                if _clean_pressreader_text(item.get("description"))
-            }
-            needs_llm = any(
-                str(item.get("path") or "").strip() not in described_paths
-                and bool(_image_description_source(item))
-                and count_cn_chars(_image_description_source(item)) == 0
-                for item in placements
-            )
-            if needs_llm and client is None:
-                client = make_llm_client(cfg)
-            article["image_placements"] = placements
-            article["image_insights"] = _translate_image_placement_descriptions(
-                client,
-                cfg,
-                title=str(article.get("title") or "Untitled"),
-                image_placements=placements,
-                image_insights=insights,
-                log_=log,
-            )
-            refreshed.append(article)
-            write_database_js(existing, authoritative=True)
-            log.info(f"[images] 已回填中文图片说明: {article.get('id')}")
-        except Exception as exc:
-            log.warning(f"[images] 中文图片说明回填失败 {article.get('id')}: {exc}")
-
-    if refreshed:
         _sync_paper_outputs(cfg, existing, issue_date=issue_date)
         _maybe_rebuild_index(cfg)
     return refreshed
@@ -4348,8 +3975,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=0, help="限制本次最多新增文章数(0=不限制)")
     p.add_argument("--refresh-glossary", action="store_true",
                    help="只按当前规则重新解析现有文章的中文关键词，不重抓或重译正文")
-    p.add_argument("--refresh-image-descriptions", action="store_true",
-                   help="只把现有来源 caption/alt text 回填为中文图片说明，不重抓正文")
     p.add_argument("--article-ids", default="",
                    help="配合刷新命令，逗号分隔 article id；留空表示全部")
     p.add_argument("--debug-data", default=None, metavar="DIR",
@@ -4392,12 +4017,6 @@ def main() -> int:
                 raise ValueError("--refresh-glossary 必须同时指定 --date")
             article_ids = {item.strip() for item in args.article_ids.split(",") if item.strip()}
             refresh_article_glossary(cfg, args.date, article_ids)
-            return 0
-        if args.refresh_image_descriptions:
-            if not args.date:
-                raise ValueError("--refresh-image-descriptions 必须同时指定 --date")
-            article_ids = {item.strip() for item in args.article_ids.split(",") if item.strip()}
-            refresh_image_descriptions(cfg, args.date, article_ids)
             return 0
         process_ft(
             cfg,

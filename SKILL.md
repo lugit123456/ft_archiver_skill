@@ -1,6 +1,6 @@
 ---
 name: ft-archiver
-description: 从 Financial Times PressReader 当前最新或指定日期期次的文本视图抓取全部板块和报道详情，下载原始图片，生成双语归档、中文解读与 glossary。
+description: 从 Financial Times PressReader 当前最新或指定日期期次的文本视图抓取全部板块和报道详情，下载并原样展示图片，生成双语归档、中文解读与 glossary。
 ---
 
 # FT Archiver
@@ -20,8 +20,9 @@ description: 从 Financial Times PressReader 当前最新或指定日期期次�
 - 页码无法可靠获得时保存为 `null`，前端不显示。
 - 单篇发布时间无法可靠获得时，时间字段保留为空。
 - 保留正文 `body`/`crosshead` 顺序。
-- 下载头图和正文图，`image_placements` 保存原始 caption、credit、alt 与位置；来源说明的中文翻译保存到同路径 `image_insights[].description`。
-- 不根据图片猜测缺失说明；来源没有 caption/alt 时，不生成 `description`。
+- 下载头图和正文图，`image_placements` 保存位置及来源元数据，但前端只输出图片本身。
+- 不把图片或来源 caption/alt 发送给 LLM，不生成、翻译或展示图片说明，`image_insights` 保持为空。
+- 正文翻译、中文标题和中文解读中的人名、公司名、机构名、品牌、平台、App、网站、产品及出版物名称保留英文原文，不音译、意译或替换成中文别称。例如始终写 `Google`、`Reddit`、`Instagram`、`TikTok`、`Sensor Tower`，不得写“谷歌”“红迪”“照片墙”“抖音海外版”“传感器塔”。
 - 每篇完成后原子更新根数据库、每日数据库和总索引。
 
 ## 命令
