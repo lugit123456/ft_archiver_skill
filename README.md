@@ -80,7 +80,7 @@ python sync_ft.py --rebuild-outputs
 - `paragraphs`：按原始顺序保存的 `body`/`crosshead` 节点及中英对照。
 - `images`：本地图片路径或下载失败时的原始 URL。
 - `image_placements`：图片位置、原始 caption、credit 与 alt text。
-- `image_insights`：为兼容旧数据库保留的字段；新归档固定为空，不解析图片，也不生成或翻译图片说明。
+- `image_insights`：每张图片生成同路径记录，`description` 默认是单个空格 `" "`。该空白值在共享前端中为 truthy，可阻止 `insight.description || article.title` 回退显示文章标题；以后可由 Python 写入真实说明。
 
 图片位置规则：
 
@@ -88,7 +88,7 @@ python sync_ft.py --rebuild-outputs
 - 正文 `figure` 按 DOM 顺序标记为 `after_paragraph`。
 - 无法可靠确定位置时标记为 `unlocated`，前端放在文末。
 - PressReader 没有提供 caption、credit 或 alt 时对应字段保持为空，不猜测。
-- 前端只显示图片本身，不显示图片分析、caption、credit 或 alt text。
+- 不解析图片，也不生成或翻译图片说明。共享前端视觉上只显示图片；原始 caption、credit 和 alt text 仅保存在 `image_placements`。
 
 专有名词翻译规则：
 

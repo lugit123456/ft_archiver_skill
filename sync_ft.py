@@ -58,6 +58,7 @@ PRESSREADER_RESOLVED_ISSUE_RE = re.compile(
 )
 PAPER_PUBLICATION_TYPE = "FT"
 PAPER_PUBLICATION_NAME = "Financial Times"
+BLANK_IMAGE_DESCRIPTION = " "
 
 
 @dataclass(frozen=True)
@@ -440,6 +441,38 @@ def _group_articles_by_issue(articles: list[dict[str, Any]]) -> dict[str, list[d
     return dict(sorted(grouped.items(), key=lambda item: item[0], reverse=True))
 
 
+def _ensure_image_insight_placeholders(
+    images: list[str],
+    image_insights: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Give every image a blank, truthy description for the shared frontend."""
+    by_path: dict[str, dict[str, Any]] = {}
+    for raw in image_insights or []:
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or "").strip()
+        if not path or path in by_path:
+            continue
+        item = dict(raw)
+        item["path"] = path
+        item.setdefault("image_type", "photo")
+        if not str(item.get("description") or ""):
+            item["description"] = BLANK_IMAGE_DESCRIPTION
+        by_path[path] = item
+
+    output: list[dict[str, Any]] = []
+    for value in images:
+        path = str(value or "").strip()
+        if not path:
+            continue
+        output.append(by_path.get(path, {
+            "path": path,
+            "image_type": "photo",
+            "description": BLANK_IMAGE_DESCRIPTION,
+        }))
+    return output
+
+
 def _normalise_paper_article(article: dict[str, Any], index: int) -> dict[str, Any]:
     article_id = str(article.get("id") or f"art_{index:03d}")
     source_paragraphs = article.get("paragraphs") if isinstance(article.get("paragraphs"), list) else []
@@ -488,6 +521,7 @@ def _normalise_paper_article(article: dict[str, Any], index: int) -> dict[str, A
         else index
     )
     section = str(article.get("section") or "General")
+    images = [str(path) for path in (article.get("images") or []) if str(path or "").strip()]
 
     return {
         "id": article_id,
@@ -522,9 +556,11 @@ def _normalise_paper_article(article: dict[str, Any], index: int) -> dict[str, A
         "content_markdown": content_markdown,
         "content_raw": str(article.get("content_raw") or article.get("content_markdown") or "").strip(),
         "paragraphs": normalized_paragraphs,
-        "images": article.get("images") or [],
+        "images": images,
         "image_placements": article.get("image_placements") or [],
-        "image_insights": article.get("image_insights") or [],
+        "image_insights": _ensure_image_insight_placeholders(
+            images, list(article.get("image_insights") or []),
+        ),
         "term_annotations": article.get("term_annotations") or [],
         "glossary_analysis_complete": bool(article.get("glossary_analysis_complete")),
         "glossary_version": int(article.get("glossary_version") or 0),
@@ -3282,8 +3318,12 @@ def compile_article_record(
 ) -> dict[str, Any] | None:
     """把抓到的正文编译成 Economist 前端需要的结构化 article。"""
     source_paragraphs = _split_article_paragraphs(body)
-    compiled_image_placements, compiled_image_insights = _migrate_image_description_fields(
+    compiled_image_placements, migrated_image_insights = _migrate_image_description_fields(
         image_placements or [], [],
+    )
+    compiled_images = list(images or [])
+    compiled_image_insights = _ensure_image_insight_placeholders(
+        compiled_images, migrated_image_insights,
     )
     if not source_paragraphs:
         if not images:
@@ -3299,7 +3339,7 @@ def compile_article_record(
             "content_raw": "",
             "content_markdown": "",
             "paragraphs": [],
-            "images": images,
+            "images": compiled_images,
             "image_placements": compiled_image_placements,
             "image_insights": compiled_image_insights,
             "glossary_entries": [],
@@ -3363,7 +3403,7 @@ def compile_article_record(
         "content_raw": _format_source_content_markdown(source_paragraphs),
         "content_markdown": _format_source_content_markdown(source_paragraphs),
         "paragraphs": compiled_paragraphs,
-        "images": images or [],
+        "images": compiled_images,
         "image_placements": compiled_image_placements,
         "image_insights": compiled_image_insights,
         "compiled_article": compile_complete,
@@ -3641,7 +3681,10 @@ def refresh_article_images(
                 article["images"] = materialize_article_images(
                     image_urls, cfg, issue_date, str(article.get("id") or "article")
                 )
-                article["image_insights"] = []
+                article["image_insights"] = _ensure_image_insight_placeholders(
+                    list(article["images"]),
+                    list(article.get("image_insights") or []),
+                )
                 refreshed.append(article)
                 log.info(
                     f"[images] 已刷新 {article.get('id')}: "
@@ -3726,9 +3769,11 @@ def _source_only_article(metadata: dict[str, Any], parsed: ParsedArticle) -> dic
         for index, item in enumerate(parsed.paragraphs, start=1)
         if str(item.get("text") or "").strip()
     ]
-    image_placements, image_insights = _migrate_image_description_fields(
+    image_placements, migrated_image_insights = _migrate_image_description_fields(
         list(metadata.get("image_placements") or []), [],
     )
+    images = list(metadata.get("images") or [])
+    image_insights = _ensure_image_insight_placeholders(images, migrated_image_insights)
     return {
         "id": article_id,
         "guid": str(metadata["guid"]),
@@ -3748,7 +3793,7 @@ def _source_only_article(metadata: dict[str, Any], parsed: ParsedArticle) -> dic
         "content_raw": parsed.body,
         "content_markdown": parsed.body,
         "paragraphs": paragraphs,
-        "images": list(metadata.get("images") or []),
+        "images": images,
         "image_placements": image_placements,
         "image_insights": image_insights,
         "glossary_entries": [],

@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 from sync_ft import (
+    _ensure_image_insight_placeholders,
     _group_articles_by_issue,
     _normalise_paper_article,
     _pressreader_issue_date_from_url,
@@ -198,6 +199,18 @@ class PressReaderSourceTests(unittest.TestCase):
 
 
 class FTStorageTests(unittest.TestCase):
+    def test_blank_image_description_blocks_shared_frontend_title_fallback(self) -> None:
+        insights = _ensure_image_insight_placeholders(
+            ["images/1.jpg", "images/2.jpg"],
+            [{"path": "images/2.jpg", "image_type": "chart", "description": "真实说明"}],
+        )
+
+        self.assertEqual(insights, [
+            {"path": "images/1.jpg", "image_type": "photo", "description": " "},
+            {"path": "images/2.jpg", "image_type": "chart", "description": "真实说明"},
+        ])
+        self.assertEqual(insights[0]["description"] or "Article title", " ")
+
     def _record(self, article_id: str = "281500758092329") -> dict:
         return {
             "id": "art_2026-08-21_001",
@@ -253,6 +266,18 @@ class FTStorageTests(unittest.TestCase):
         self.assertEqual(normalized["image_placements"][0]["caption"], "Caption")
         self.assertNotIn("description_zh", normalized["image_placements"][0])
         self.assertEqual(normalized["image_insights"][0]["description"], "中文图片说明")
+
+    def test_daily_article_backfills_blank_image_description(self) -> None:
+        record = self._record()
+        record["image_insights"] = []
+
+        normalized = _normalise_paper_article(record, 1)
+
+        self.assertEqual(normalized["image_insights"], [{
+            "path": "images/example.jpg",
+            "image_type": "photo",
+            "description": " ",
+        }])
 
     def test_legacy_placement_description_moves_to_image_insights(self) -> None:
         placements, insights = _migrate_image_description_fields([{

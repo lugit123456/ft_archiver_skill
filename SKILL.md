@@ -21,7 +21,7 @@ description: 从 Financial Times PressReader 当前最新或指定日期期次�
 - 单篇发布时间无法可靠获得时，时间字段保留为空。
 - 保留正文 `body`/`crosshead` 顺序。
 - 下载头图和正文图，`image_placements` 保存位置及来源元数据，但前端只输出图片本身。
-- 不把图片或来源 caption/alt 发送给 LLM，不生成、翻译或展示图片说明，`image_insights` 保持为空。
+- 不把图片或来源 caption/alt 发送给 LLM，也不生成或翻译图片说明。每张图片生成同路径的 `image_insights`，`description` 默认使用单个空格 `" "`，阻止共享前端回退显示文章标题；以后需要说明时由 Python 写入真实描述。
 - 正文翻译、中文标题和中文解读中的人名、公司名、机构名、品牌、平台、App、网站、产品及出版物名称保留英文原文，不音译、意译或替换成中文别称。例如始终写 `Google`、`Reddit`、`Instagram`、`TikTok`、`Sensor Tower`，不得写“谷歌”“红迪”“照片墙”“抖音海外版”“传感器塔”。
 - 每篇完成后原子更新根数据库、每日数据库和总索引。
 

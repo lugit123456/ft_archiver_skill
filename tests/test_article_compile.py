@@ -162,7 +162,11 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertEqual(stored_placement["alt_text"], placement["alt_text"])
         self.assertEqual(stored_placement["credit"], "FT")
         self.assertNotIn("description_zh", stored_placement)
-        self.assertEqual(article["image_insights"], [])
+        self.assertEqual(article["image_insights"], [{
+            "path": "images/example.jpg",
+            "image_type": "photo",
+            "description": " ",
+        }])
         self.assertNotIn("description_zh", placement)
         self.assertTrue(article["compiled_article"])
 
@@ -194,7 +198,11 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertIsNotNone(article)
         assert article is not None
         self.assertEqual(len(completions.requests), 2)
-        self.assertEqual(article["image_insights"], [])
+        self.assertEqual(article["image_insights"], [{
+            "path": "images/example.jpg",
+            "image_type": "photo",
+            "description": " ",
+        }])
         self.assertNotIn("description_zh", article["image_placements"][0])
 
     def test_summary_length_expands_with_source_size(self) -> None:
