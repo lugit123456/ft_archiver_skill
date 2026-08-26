@@ -49,7 +49,7 @@ done
 
 PUBLISHER_DIR=${PAPER_PUBLISHER_DIR:-"$SCRIPT_DIR/../auto-paper-md-converter-skill"}
 if [[ ! -d "$PUBLISHER_DIR" ]]; then
-  print -u2 "跳过线上发布：未找到发布项目 $PUBLISHER_DIR"
+  print -u2 "跳过本地静态部署：未找到发布项目 $PUBLISHER_DIR"
   exit 0
 fi
 
@@ -112,13 +112,14 @@ while true; do
       --ft-output-dir "$FT_OUTPUT_DIR" \
       --te-output-dir "$TE_OUTPUT_DIR"
   ); then
+    print -u2 "报刊本地静态部署完成"
     break
   fi
   publish_status=$?
   if (( publish_attempt >= PUBLISH_MAX_ATTEMPTS )); then
     exit "$publish_status"
   fi
-  print -u2 "报刊线上发布失败，${PUBLISH_RETRY_DELAY_S}s 后重试 (${publish_attempt}/${PUBLISH_MAX_ATTEMPTS})"
+  print -u2 "报刊本地静态部署失败，${PUBLISH_RETRY_DELAY_S}s 后重试 (${publish_attempt}/${PUBLISH_MAX_ATTEMPTS})"
   sleep "$PUBLISH_RETRY_DELAY_S"
   (( publish_attempt++ ))
 done
