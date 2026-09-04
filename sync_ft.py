@@ -3267,7 +3267,135 @@ def _request_article_translation(
                 break
             time.sleep(1.0)
 
-    raise last_error or RuntimeError("逐段翻译失败")
+    log_.warning("逐段翻译数组模式失败，改用编号映射模式重试: %s", last_error)
+    return _request_article_translation_numbered(
+        client,
+        cfg,
+        title=title,
+        section=section,
+        source_paragraphs=source_paragraphs,
+        article_id=article_id,
+        log_=log_,
+    )
+
+
+def _translation_numbered_prompt(
+    title: str,
+    section: str,
+    paragraphs: list[dict[str, str]],
+) -> str:
+    return f"""请把下面《Financial Times》文章逐段译成自然中文，只返回严格 JSON object。
+
+要求：
+1. 必须返回 translations 对象，键为段落编号字符串 "1"、"2"，一直到 "{len(paragraphs)}"。
+2. 每个编号必须对应一个完整中文译文，不得空缺，不得合并或省略。
+3. 人名、公司名、机构名、品牌、平台、App、网站、产品和出版物名称必须保留英文原文，不音译、不意译。例如必须写 Google、Reddit、Instagram、TikTok、Sensor Tower、Andy Burnham、Emmanuel Macron、Labour、Barclays、HSBC，不得写“谷歌”“红迪”“照片墙”“抖音海外版”。
+4. 国家、地区、政策、法律和普通概念可按中文习惯翻译；引号内专有项目名如 "Made in Europe" 保留英文。
+5. 不输出解释、摘要或 Markdown 代码块。
+
+Title: {title}
+Section: {section}
+
+Source paragraphs:
+{_render_article_prompt_paragraphs(paragraphs)}
+
+Return JSON in this shape:
+{{
+  "translations": {{
+    "1": "第一段中文译文",
+    "2": "第二段中文译文"
+  }}
+}}
+"""
+
+
+def _normalise_numbered_translations(
+    source_paragraphs: list[dict[str, str]],
+    raw_translations: Any,
+    article_id: str,
+) -> list[dict[str, str]]:
+    if isinstance(raw_translations, list):
+        translations = {str(index): value for index, value in enumerate(raw_translations, start=1)}
+    elif isinstance(raw_translations, dict):
+        translations = raw_translations
+    else:
+        raise LLMOutputValidationError("translations 不是 object")
+
+    translated: list[dict[str, str]] = []
+    missing: list[int] = []
+    for index, source in enumerate(source_paragraphs, start=1):
+        raw_value = translations.get(str(index))
+        if isinstance(raw_value, dict):
+            zh_text = str(raw_value.get("zh_text") or raw_value.get("translation") or "").strip()
+        else:
+            zh_text = str(raw_value or "").strip()
+        if not zh_text:
+            missing.append(index)
+        translated.append(
+            {
+                "para_id": f"{article_id}_p{index}",
+                "en_text": str(source.get("en_text") or "").strip(),
+                "zh_text": zh_text,
+                "role": str(source.get("role") or "body").strip() or "body",
+            }
+        )
+    if missing:
+        raise LLMOutputValidationError(
+            "编号翻译缺少译文段落: " + ", ".join(map(str, missing[:10]))
+        )
+    return translated
+
+
+def _request_article_translation_numbered(
+    client: Any,
+    cfg: dict[str, Any],
+    *,
+    title: str,
+    section: str,
+    source_paragraphs: list[dict[str, str]],
+    article_id: str,
+    log_: logging.Logger,
+) -> list[dict[str, str]]:
+    llm = cfg["llm"]
+    prompt = _translation_numbered_prompt(title, section, source_paragraphs)
+    max_retries = int(cfg["crawl"].get("max_retries", 2))
+    source_words = _source_word_count(source_paragraphs)
+    translation_token_floor = 8192 if source_words > 1800 else 4096
+    max_tokens = max(int(llm.get("max_tokens", 2048)), translation_token_floor)
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=llm.get("model", "gpt-4o-mini"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "只返回 JSON。逐段翻译，编号必须完整。英文人名、公司名、"
+                            "机构名、品牌、平台、App、网站、产品和出版物名称必须保留英文原文。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            payload = _extract_json_payload(response.choices[0].message.content or "")
+            return _normalise_numbered_translations(
+                source_paragraphs,
+                payload.get("translations"),
+                article_id,
+            )
+        except Exception as exc:
+            last_error = exc
+            log_.warning(f"编号映射翻译失败 (attempt {attempt + 1}): {exc}")
+            if not _should_retry_llm_error(exc, attempt, max_retries):
+                break
+            time.sleep(1.0)
+
+    raise last_error or RuntimeError("编号映射翻译失败")
 
 
 def _migrate_image_description_fields(
@@ -3821,6 +3949,215 @@ def refresh_article_glossary(
     return refreshed
 
 
+def _article_source_paragraphs(article: dict[str, Any]) -> list[dict[str, str]]:
+    paragraphs: list[dict[str, str]] = []
+    for paragraph in article.get("paragraphs") or []:
+        if not isinstance(paragraph, dict):
+            continue
+        en_text = str(paragraph.get("en_text") or paragraph.get("text") or "").strip()
+        if en_text:
+            paragraphs.append(
+                {
+                    "role": str(paragraph.get("role") or "body").strip() or "body",
+                    "en_text": en_text,
+                }
+            )
+    if paragraphs:
+        return paragraphs
+    return _split_article_paragraphs(
+        str(article.get("content_raw") or article.get("content_markdown") or "")
+    )
+
+
+def _article_quality_issues(article: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    if not str(article.get("title_zh") or "").strip():
+        issues.append("title_zh")
+    if not str(article.get("summary_md") or "").strip():
+        issues.append("summary_md")
+    missing = [
+        str(index)
+        for index, paragraph in enumerate(article.get("paragraphs") or [], start=1)
+        if isinstance(paragraph, dict)
+        and str(paragraph.get("en_text") or "").strip()
+        and not str(paragraph.get("zh_text") or "").strip()
+    ]
+    if missing:
+        issues.append("zh_text:" + ",".join(missing[:20]))
+    return issues
+
+
+def _request_title_translation(
+    client: Any,
+    cfg: dict[str, Any],
+    *,
+    title: str,
+    section: str,
+    log_: logging.Logger,
+) -> str:
+    llm = cfg["llm"]
+    prompt = f"""请把下面《Financial Times》文章标题译成自然、准确的中文标题，只返回严格 JSON。
+
+要求：
+1. 标题简洁清楚，不写解释。
+2. 人名、公司名、机构名、品牌、平台、App、网站、产品和出版物名称保留英文原文，不音译、不意译。
+3. 国家、地区、政策、法律和普通概念可按中文习惯翻译。
+
+Title: {title}
+Section: {section}
+
+Return JSON:
+{{"title_zh": "中文标题"}}
+"""
+    last_error: Exception | None = None
+    max_retries = int(cfg["crawl"].get("max_retries", 2))
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=llm.get("model", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": "只返回 JSON。英文专名必须保留英文原文。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=512,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            payload = _extract_json_payload(response.choices[0].message.content or "")
+            title_zh = str(payload.get("title_zh") or "").strip()
+            if not title_zh:
+                raise LLMOutputValidationError("title_zh 为空")
+            return title_zh
+        except Exception as exc:
+            last_error = exc
+            log_.warning("标题补译失败 (attempt %d): %s", attempt + 1, exc)
+            if not _should_retry_llm_error(exc, attempt, max_retries):
+                break
+            time.sleep(1.0)
+    raise last_error or RuntimeError("标题补译失败")
+
+
+def _select_repair_dates(articles: list[dict[str, Any]], issue_date: str | None) -> set[str]:
+    if issue_date:
+        return {issue_date}
+    dates = sorted(
+        {str(article.get("issue_date") or "") for article in articles if article.get("issue_date")},
+        key=_date_key,
+    )
+    return {dates[-1]} if dates else set()
+
+
+def repair_missing_translations(
+    cfg: dict[str, Any],
+    issue_date: str | None = None,
+    article_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """发布前质量门禁：自动补齐中文标题、摘要和段落译文；仍有空白则失败。"""
+    articles = read_database_js()
+    selected_dates = _select_repair_dates(articles, issue_date)
+    selected_ids = article_ids or set()
+    if not selected_dates:
+        log.info("[repair] 数据库为空，跳过中文完整性检查")
+        return []
+
+    targets = [
+        article for article in articles
+        if str(article.get("issue_date") or "") in selected_dates
+        and (not selected_ids or str(article.get("id") or "") in selected_ids)
+        and _article_quality_issues(article)
+    ]
+    if not targets:
+        log.info("[repair] 中文完整性检查通过: dates=%s", ",".join(sorted(selected_dates)))
+        return []
+    if not str(cfg["llm"].get("api_key") or "").strip():
+        raise RuntimeError("[repair] 发现中文空白但 LLM_API_KEY 未配置")
+
+    client = make_llm_client(cfg)
+    repaired: list[dict[str, Any]] = []
+    for article in targets:
+        article_id = str(article.get("id") or "")
+        source_paragraphs = _article_source_paragraphs(article)
+        before = _article_quality_issues(article)
+        log.info("[repair] 修复 %s: %s", article_id, ";".join(before))
+
+        if any(issue.startswith("zh_text:") for issue in before):
+            article["paragraphs"] = _request_article_translation(
+                client,
+                cfg,
+                title=str(article.get("title") or ""),
+                section=str(article.get("section") or ""),
+                source_paragraphs=source_paragraphs,
+                article_id=article_id,
+                log_=log,
+            )
+
+        if not str(article.get("summary_md") or "").strip() and source_paragraphs:
+            try:
+                title_zh, summary_md = _request_article_summary(
+                    client,
+                    cfg,
+                    title=str(article.get("title") or ""),
+                    section=str(article.get("section") or ""),
+                    source_paragraphs=source_paragraphs,
+                    log_=log,
+                )
+                article["title_zh"] = article.get("title_zh") or title_zh
+                article["summary_md"] = summary_md
+            except Exception as exc:
+                log.warning("[repair] 中文解读补写失败，使用兼容摘要: %s", exc)
+                article["summary_md"] = summarize(
+                    client,
+                    cfg,
+                    str(article.get("title") or ""),
+                    _format_source_content_markdown(source_paragraphs),
+                    log,
+                )
+
+        if not str(article.get("title_zh") or "").strip():
+            article["title_zh"] = _request_title_translation(
+                client,
+                cfg,
+                title=str(article.get("title") or ""),
+                section=str(article.get("section") or ""),
+                log_=log,
+            )
+
+        if any(paragraph.get("zh_text") for paragraph in article.get("paragraphs") or []):
+            article["glossary_entries"] = []
+            article["term_annotations"] = []
+            article["glossary_analysis_complete"] = False
+            article["glossary_version"] = 0
+            enrich_article_glossary(client, cfg, article, log)
+
+        remaining = _article_quality_issues(article)
+        article["compiled_article"] = not remaining
+        article["compile_status"] = "complete" if not remaining else "fallback"
+        write_database_js(articles, authoritative=True)
+        _sync_paper_outputs(cfg, read_database_js(), issue_date=str(article.get("issue_date") or ""))
+        repaired.append(article)
+        if remaining:
+            raise RuntimeError(f"[repair] {article_id} 仍有中文空白: {remaining}")
+        log.info("[repair] 已修复 %s", article_id)
+
+    final_articles = read_database_js()
+    remaining_targets = [
+        article for article in final_articles
+        if str(article.get("issue_date") or "") in selected_dates
+        and (not selected_ids or str(article.get("id") or "") in selected_ids)
+        and _article_quality_issues(article)
+    ]
+    if remaining_targets:
+        details = {
+            str(article.get("id") or ""): _article_quality_issues(article)
+            for article in remaining_targets
+        }
+        raise RuntimeError(f"[repair] 中文完整性检查未通过: {details}")
+    _sync_paper_outputs(cfg, final_articles)
+    _maybe_rebuild_index(cfg)
+    log.info("[repair] 中文完整性检查通过，修复 %d 篇", len(repaired))
+    return repaired
+
+
 def _persist_ft_state(
     cfg: dict[str, Any],
     articles: list[dict[str, Any]],
@@ -4098,6 +4435,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=0, help="限制本次最多新增文章数(0=不限制)")
     p.add_argument("--refresh-glossary", action="store_true",
                    help="只按当前规则重新解析现有文章的中文关键词，不重抓或重译正文")
+    p.add_argument("--repair-missing-translations", action="store_true",
+                   help="发布前检查并自动补齐指定期次的空中文标题、摘要和段落译文")
     p.add_argument("--article-ids", default="",
                    help="配合刷新命令，逗号分隔 article id；留空表示全部")
     p.add_argument("--debug-data", default=None, metavar="DIR",
@@ -4143,6 +4482,10 @@ def main() -> int:
                 raise ValueError("--refresh-glossary 必须同时指定 --date")
             article_ids = {item.strip() for item in args.article_ids.split(",") if item.strip()}
             refresh_article_glossary(cfg, args.date, article_ids)
+            return 0
+        if args.repair_missing_translations:
+            article_ids = {item.strip() for item in args.article_ids.split(",") if item.strip()}
+            repair_missing_translations(cfg, args.date or None, article_ids)
             return 0
         process_ft(
             cfg,

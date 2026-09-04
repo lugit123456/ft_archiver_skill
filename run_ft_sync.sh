@@ -34,6 +34,32 @@ while true; do
   (( attempt++ ))
 done
 
+REPAIR_AFTER_SYNC=${REPAIR_AFTER_SYNC:-1}
+skip_repair=0
+repair_args=()
+expect_repair_date=0
+for arg in "$@"; do
+  if (( expect_repair_date )); then
+    repair_args+=(--date "$arg")
+    expect_repair_date=0
+    continue
+  fi
+  case "$arg" in
+    --date)
+      expect_repair_date=1
+      ;;
+    --date=*)
+      repair_args+=(--date "${arg#--date=}")
+      ;;
+    --login|--dry-run|--no-llm|--help|-h|--rebuild-outputs|--refresh-glossary|--repair-missing-translations)
+      skip_repair=1
+      ;;
+  esac
+done
+if [[ "$REPAIR_AFTER_SYNC" != "0" && "$REPAIR_AFTER_SYNC" != "false" && "$REPAIR_AFTER_SYNC" != "False" && "$skip_repair" == "0" ]]; then
+  "$PYTHON_BIN" sync_ft.py --repair-missing-translations "${repair_args[@]}"
+fi
+
 AUTO_PUBLISH_AFTER_SYNC=${AUTO_PUBLISH_AFTER_SYNC:-1}
 if [[ "$AUTO_PUBLISH_AFTER_SYNC" == "0" || "$AUTO_PUBLISH_AFTER_SYNC" == "false" || "$AUTO_PUBLISH_AFTER_SYNC" == "False" ]]; then
   exit 0

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import sync_ft
 from sync_ft import (
     DEFAULTS,
+    _request_article_translation,
     _summary_length_bounds,
     compile_article_record,
+    repair_missing_translations,
 )
 
 
@@ -126,6 +131,116 @@ class ArticleCompileTests(unittest.TestCase):
         self.assertIn("忠实翻译全文", completions.requests[0]["messages"][0]["content"])  # type: ignore[index]
         self.assertIn("忠实翻译全文", completions.requests[1]["messages"][0]["content"])  # type: ignore[index]
         self.assertIn("原创编辑稿", completions.requests[2]["messages"][0]["content"])  # type: ignore[index]
+
+    def test_translation_falls_back_to_numbered_mapping_after_count_mismatch(self) -> None:
+        client, completions = _client([
+            {"paragraphs": [{"zh_text": "被合并的译文。", "role": "body"}]},
+            {"translations": {"1": "第一段译文。", "2": "第二段译文。"}},
+        ])
+
+        translated = _request_article_translation(
+            client,
+            _config(),
+            title="Fallback translation",
+            section="Main",
+            source_paragraphs=[
+                {"role": "body", "en_text": "First source paragraph."},
+                {"role": "body", "en_text": "Second source paragraph."},
+            ],
+            article_id="art_fallback",
+            log_=logging.getLogger("test"),
+        )
+
+        self.assertEqual(len(completions.requests), 2)
+        fallback_prompt = completions.requests[1]["messages"][1]["content"]  # type: ignore[index]
+        self.assertIn("translations 对象", fallback_prompt)
+        self.assertEqual(
+            [paragraph["para_id"] for paragraph in translated],
+            ["art_fallback_p1", "art_fallback_p2"],
+        )
+        self.assertEqual(
+            [paragraph["zh_text"] for paragraph in translated],
+            ["第一段译文。", "第二段译文。"],
+        )
+
+    def test_repair_missing_translations_refills_blanks_before_publish(self) -> None:
+        cfg = _config()
+        cfg["llm"]["api_key"] = "test-key"  # type: ignore[index]
+        article = {
+            "id": "art_2026-09-03_001",
+            "issue_date": "2026-09-03",
+            "section": "Main",
+            "title": "A test article",
+            "title_zh": "",
+            "url": "https://example.com/repair",
+            "summary_md": "",
+            "content_raw": "First source paragraph.\n\nSecond source paragraph.",
+            "content_markdown": "First source paragraph.\n\nSecond source paragraph.",
+            "paragraphs": [
+                {
+                    "para_id": "art_2026-09-03_001_p1",
+                    "en_text": "First source paragraph.",
+                    "zh_text": "",
+                    "role": "body",
+                },
+                {
+                    "para_id": "art_2026-09-03_001_p2",
+                    "en_text": "Second source paragraph.",
+                    "zh_text": "第二段旧译文。",
+                    "role": "body",
+                },
+            ],
+            "images": [],
+            "image_placements": [],
+            "image_insights": [],
+            "compiled_article": False,
+            "compile_status": "fallback",
+            "glossary_entries": [],
+            "term_annotations": [],
+            "glossary_analysis_complete": False,
+            "glossary_version": 0,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "database.js"
+            with patch.object(sync_ft, "DATABASE_JS", database):
+                sync_ft.write_database_js([article], authoritative=True)
+                with (
+                    patch("sync_ft.make_llm_client", return_value=object()),
+                    patch("sync_ft._request_article_translation", return_value=[
+                        {
+                            "para_id": "art_2026-09-03_001_p1",
+                            "en_text": "First source paragraph.",
+                            "zh_text": "第一段新译文。",
+                            "role": "body",
+                        },
+                        {
+                            "para_id": "art_2026-09-03_001_p2",
+                            "en_text": "Second source paragraph.",
+                            "zh_text": "第二段新译文。",
+                            "role": "body",
+                        },
+                    ]) as translate,
+                    patch("sync_ft._request_article_summary", return_value=("中文标题", _natural_summary())),
+                    patch("sync_ft.enrich_article_glossary", side_effect=lambda _client, _cfg, item, _log: item),
+                    patch("sync_ft._sync_paper_outputs") as sync_outputs,
+                    patch("sync_ft._maybe_rebuild_index") as rebuild_index,
+                ):
+                    repaired = repair_missing_translations(cfg, "2026-09-03")
+                stored = sync_ft.read_database_js()
+
+        self.assertEqual([item["id"] for item in repaired], ["art_2026-09-03_001"])
+        self.assertEqual(stored[0]["title_zh"], "中文标题")
+        self.assertEqual(stored[0]["summary_md"], _natural_summary())
+        self.assertEqual([item["zh_text"] for item in stored[0]["paragraphs"]], [
+            "第一段新译文。",
+            "第二段新译文。",
+        ])
+        self.assertTrue(stored[0]["compiled_article"])
+        self.assertEqual(stored[0]["compile_status"], "complete")
+        translate.assert_called_once()
+        self.assertTrue(sync_outputs.called)
+        rebuild_index.assert_called_once()
 
     def test_source_image_metadata_is_preserved_without_image_llm_request(self) -> None:
         client, completions = _client([
