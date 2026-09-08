@@ -106,7 +106,7 @@ class PressReaderSourceTests(unittest.TestCase):
         )
         self.assertEqual(
             pressreader_first_page_cover_url("https://ft.pressreader.com/v99c/20260821/textview"),
-            "",
+            "https://t.prcdn.co/img?file=v99c2026082100000000001001&page=1&width=800",
         )
 
     def test_auto_mode_accepts_latest_issue_redirect(self) -> None:

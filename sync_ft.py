@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -53,7 +53,10 @@ PRESSREADER_DETAIL_URL_RE = re.compile(
     re.IGNORECASE,
 )
 PRESSREADER_RESOLVED_ISSUE_RE = re.compile(
-    r"^https://ft\.pressreader\.com/v99c(?P<date>\d{8})\d+(?:/textview)?/?(?:[?#].*)?$",
+    r"^https://ft\.pressreader\.com/(?:"
+    r"v99c(?P<resolved_date>\d{8})\d+(?:/textview)?/?"
+    r"|v99c/(?P<direct_date>\d{8})(?:/textview)?/?"
+    r")(?:[?#].*)?$",
     re.IGNORECASE,
 )
 PAPER_PUBLICATION_TYPE = "FT"
@@ -174,6 +177,7 @@ DEFAULTS = {
     },
     "glossary": {
         "enabled": True,
+        "repair_enabled": True,
         "model": "",
         "max_terms": 32,
         "max_candidates": 32,
@@ -322,6 +326,9 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     raw_glossary_enabled = src.get("LLM_GLOSSARY_ENABLED", "").strip().lower()
     if raw_glossary_enabled:
         cfg["glossary"]["enabled"] = raw_glossary_enabled in ("1", "true", "yes", "on")
+    raw_glossary_repair_enabled = src.get("LLM_GLOSSARY_REPAIR_ENABLED", "").strip().lower()
+    if raw_glossary_repair_enabled:
+        cfg["glossary"]["repair_enabled"] = raw_glossary_repair_enabled in ("1", "true", "yes", "on")
     paths = cfg.get("paths") or {}
     if not str(paths.get("output_root") or "").strip():
         paths["output_root"] = str(ROOT / "output_results")
@@ -673,11 +680,10 @@ def _write_paper_issue_database(
     return database_path, pdf_id, payload
 
 
-def _write_paper_database_index(
+def _paper_database_index_items(
     output_root: Path,
     grouped_articles: dict[str, list[dict[str, Any]]],
-) -> Path:
-    index_path = output_root / "database_index.js"
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for issue_date, issue_articles in grouped_articles.items():
         pdf_id = f"{PAPER_PUBLICATION_TYPE}_{issue_date}_ft-daily"
@@ -703,7 +709,46 @@ def _write_paper_database_index(
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
         )
+    return items
+
+
+def _write_paper_database_index(
+    output_root: Path,
+    grouped_articles: dict[str, list[dict[str, Any]]],
+) -> Path:
+    index_path = output_root / "database_index.js"
+    items = _paper_database_index_items(output_root, grouped_articles)
     text = "window.paper_db_index = " + json.dumps(items, ensure_ascii=False, indent=2) + ";\n"
+    _write_atomic_text(index_path, text)
+    return index_path
+
+
+def _upsert_paper_database_index(
+    output_root: Path,
+    grouped_articles: dict[str, list[dict[str, Any]]],
+) -> Path:
+    index_path = output_root / "database_index.js"
+    existing_items: list[dict[str, Any]] = []
+    if index_path.exists():
+        try:
+            text = index_path.read_text(encoding="utf-8")
+            matched = re.search(r"=\s*(\[.*\])\s*;\s*$", text, re.S)
+            if matched:
+                payload = json.loads(matched.group(1))
+                if isinstance(payload, list):
+                    existing_items = [item for item in payload if isinstance(item, dict)]
+        except Exception as exc:
+            log.warning("[paper] 读取既有 database_index.js 失败，将重写相关条目: %s", exc)
+
+    new_items = _paper_database_index_items(output_root, grouped_articles)
+    new_ids = {str(item.get("id") or "") for item in new_items}
+    merged = [
+        item for item in existing_items
+        if str(item.get("id") or "") not in new_ids
+    ]
+    merged.extend(new_items)
+    merged.sort(key=lambda item: str(item.get("publication_date") or ""))
+    text = "window.paper_db_index = " + json.dumps(merged, ensure_ascii=False, indent=2) + ";\n"
     _write_atomic_text(index_path, text)
     return index_path
 
@@ -715,7 +760,17 @@ def _sync_paper_outputs(
     issue_covers: dict[str, str] | None = None,
 ) -> None:
     output_root = _paper_output_root(cfg)
-    grouped = _group_articles_by_issue(articles)
+    if issue_date:
+        grouped = {
+            issue_date: [
+                article for article in articles
+                if str(article.get("issue_date") or "") == issue_date
+            ]
+        }
+        if not grouped[issue_date]:
+            return
+    else:
+        grouped = _group_articles_by_issue(articles)
     for grouped_issue_date, issue_articles in grouped.items():
         _write_paper_issue_database(
             output_root,
@@ -723,7 +778,10 @@ def _sync_paper_outputs(
             issue_articles,
             cover_image=(issue_covers or {}).get(grouped_issue_date, ""),
         )
-    _write_paper_database_index(output_root, grouped)
+    if issue_date:
+        _upsert_paper_database_index(output_root, grouped)
+    else:
+        _write_paper_database_index(output_root, grouped)
 
 
 def _date_key(s: str) -> int:
@@ -1007,6 +1065,9 @@ def open_browser(user_data_path: str, headless: bool):
         sys.exit(f"未安装 drissionpage: pip install -r requirements.txt ({e})")
 
     opts = ChromiumOptions()
+    browser_path = os.getenv("BROWSER_PATH", "").strip() or os.getenv("CHROME_PATH", "").strip()
+    if browser_path:
+        opts.set_browser_path(browser_path)
 
     # 0. 清残留进程 + lock(脚本崩过后会留下孤儿)
     _cleanup_stale_chrome_locks(user_data_path)
@@ -1017,7 +1078,7 @@ def open_browser(user_data_path: str, headless: bool):
 
     # 2. 设置用户目录
     opts.set_user_data_path(user_data_path)
-    opts.headless = bool(headless)
+    opts.headless(bool(headless))
 
     # 3. Mac 环境下建议加上这两个参数以增加稳定性
     opts.set_argument('--no-sandbox')
@@ -1854,10 +1915,9 @@ def _pressreader_issue_date_from_url(value: str) -> str:
     raw = str(value or "")
     matched = PRESSREADER_RESOLVED_ISSUE_RE.match(raw)
     if not matched:
-        matched = re.match(r"^https://ft\.pressreader\.com/v99c/(?P<date>\d{8})(?:/|$)", raw)
-    if not matched:
         return ""
-    return datetime.strptime(matched.group("date"), "%Y%m%d").date().isoformat()
+    raw_date = matched.group("resolved_date") or matched.group("direct_date") or ""
+    return datetime.strptime(raw_date, "%Y%m%d").date().isoformat()
 
 
 def resolve_pressreader_issue_date(
@@ -1887,6 +1947,8 @@ def pressreader_first_page_cover_url(resolved_url: str, width: int = 800) -> str
     parsed = urlparse(str(resolved_url or "").strip())
     parts = [part for part in parsed.path.split("/") if part]
     file_id = parts[0] if parts else ""
+    if file_id.lower() == "v99c" and len(parts) >= 2 and re.fullmatch(r"\d{8}", parts[1]):
+        file_id = f"v99c{parts[1]}00000000001001"
     if not re.fullmatch(r"v99c\d{20,}", file_id, re.IGNORECASE):
         return ""
     return f"https://t.prcdn.co/img?file={file_id}&page=1&width={max(1, int(width))}"
@@ -3056,7 +3118,7 @@ def enrich_article_glossary(
         article.get("term_annotations") or [],
         article.get("glossary_entries") or [],
     )
-    if succeeded and missing:
+    if succeeded and missing and glossary_cfg.get("repair_enabled", True):
         repair_limit = min(max_terms, len(missing))
         repair_prompt = _glossary_prompt(
             str(article.get("title") or "Untitled"), paragraphs, repair_limit, missing,
@@ -4152,7 +4214,8 @@ def repair_missing_translations(
             for article in remaining_targets
         }
         raise RuntimeError(f"[repair] 中文完整性检查未通过: {details}")
-    _sync_paper_outputs(cfg, final_articles)
+    for selected_date in selected_dates:
+        _sync_paper_outputs(cfg, final_articles, issue_date=selected_date)
     _maybe_rebuild_index(cfg)
     log.info("[repair] 中文完整性检查通过，修复 %d 篇", len(repaired))
     return repaired
@@ -4161,11 +4224,18 @@ def repair_missing_translations(
 def _persist_ft_state(
     cfg: dict[str, Any],
     articles: list[dict[str, Any]],
+    issue_date: str | None = None,
     issue_covers: dict[str, str] | None = None,
 ) -> None:
     write_database_js(articles, authoritative=True)
-    _sync_paper_outputs(cfg, articles, issue_covers=issue_covers)
-    _maybe_rebuild_index(cfg)
+    _sync_paper_outputs(
+        cfg,
+        articles,
+        issue_date=issue_date,
+        issue_covers=issue_covers,
+    )
+    if issue_date is None:
+        _maybe_rebuild_index(cfg)
 
 
 def _source_only_article(metadata: dict[str, Any], parsed: ParsedArticle) -> dict[str, Any]:
@@ -4232,23 +4302,68 @@ def process_ft(
     cookie_path = Path(browser_cfg["cookie_path"]).expanduser()
     try:
         load_ft_cookies(page, cookie_path)
-        entitlement_url = activate_pressreader_entitlement(page, cfg)
-        save_ft_cookies(page, cookie_path)
         auto_latest = not issue_date
-        if auto_latest:
-            issue_date = _pressreader_issue_date_from_url(entitlement_url)
+        direct_fallback_dates: list[str] = []
+        try:
+            entitlement_url = activate_pressreader_entitlement(page, cfg)
+            save_ft_cookies(page, cookie_path)
+            if auto_latest:
+                issue_date = _pressreader_issue_date_from_url(entitlement_url)
+                if not issue_date:
+                    raise RuntimeError("FT ePaper 授权入口未返回可识别的最新期次日期")
+                preview_url = entitlement_url
+                log.info("自动模式使用 FT 当前最新期次: %s", issue_date)
+        except Exception as exc:
             if not issue_date:
-                raise RuntimeError("FT ePaper 授权入口未返回可识别的最新期次日期")
-            preview_url = entitlement_url
-            log.info("自动模式使用 FT 当前最新期次: %s", issue_date)
-        issue = discover_pressreader_issue(
-            page,
-            cfg,
-            issue_date,
-            preview_url=preview_url,
-            debug_data_dir=debug_data_dir,
-            accept_date_redirect=auto_latest,
-        )
+                today = datetime.now().date()
+                direct_fallback_dates = [
+                    (today - timedelta(days=offset)).isoformat()
+                    for offset in range(8)
+                ]
+                issue_date = direct_fallback_dates[0]
+                auto_latest = True
+            preview_url = preview_url or pressreader_issue_url(
+                issue_date,
+                str(cfg["crawl"].get("issue_base_url") or PRESSREADER_ISSUE_BASE_URL),
+            )
+            log.warning(
+                "FT ePaper 授权入口不可用，改用 PressReader 直接入口 %s: %s",
+                preview_url,
+                exc,
+            )
+        issue: PressReaderIssue | None = None
+        if direct_fallback_dates:
+            last_error: Exception | None = None
+            for fallback_date in direct_fallback_dates:
+                fallback_url = pressreader_issue_url(
+                    fallback_date,
+                    str(cfg["crawl"].get("issue_base_url") or PRESSREADER_ISSUE_BASE_URL),
+                )
+                try:
+                    issue = discover_pressreader_issue(
+                        page,
+                        cfg,
+                        fallback_date,
+                        preview_url=fallback_url,
+                        debug_data_dir=debug_data_dir,
+                        accept_date_redirect=True,
+                    )
+                    log.info("PressReader 直接入口使用最近可用期次: %s", issue.issue_date)
+                    break
+                except Exception as fallback_exc:
+                    last_error = fallback_exc
+                    log.warning("PressReader 直接入口不可用 %s: %s", fallback_date, fallback_exc)
+            if issue is None:
+                raise last_error or RuntimeError("PressReader 直接入口未找到最近可用期次")
+        else:
+            issue = discover_pressreader_issue(
+                page,
+                cfg,
+                issue_date,
+                preview_url=preview_url,
+                debug_data_dir=debug_data_dir,
+                accept_date_redirect=auto_latest,
+            )
         issue_date = issue.issue_date
         existing = read_database_js()
         existing_guids = {
@@ -4303,8 +4418,8 @@ def process_ft(
             existing_guids.add(article_guid)
             existing_by_guid[article_guid] = article
             new_articles.append(article)
-            _persist_ft_state(cfg, existing, issue_covers=issue_covers)
-            log.info("已收录并更新根库、每日库和索引: %s - %s", article["id"], article["title"][:80])
+            _persist_ft_state(cfg, existing, issue_date=issue_date, issue_covers=issue_covers)
+            log.info("已收录并更新根库、每日库和轻量索引: %s - %s", article["id"], article["title"][:80])
 
         with ThreadPoolExecutor(
             max_workers=compile_workers,

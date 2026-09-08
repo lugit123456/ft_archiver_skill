@@ -1,7 +1,7 @@
-#!/bin/zsh
+#!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR=${0:A:h}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [[ -x .venv/bin/python ]]; then
@@ -29,7 +29,7 @@ while true; do
   if (( attempt >= SYNC_MAX_ATTEMPTS )); then
     exit "$sync_status"
   fi
-  print -u2 "FT 同步失败，${SYNC_RETRY_DELAY_S}s 后重试 (${attempt}/${SYNC_MAX_ATTEMPTS})"
+  printf '%s\n' "FT 同步失败，${SYNC_RETRY_DELAY_S}s 后重试 (${attempt}/${SYNC_MAX_ATTEMPTS})" >&2
   sleep "$SYNC_RETRY_DELAY_S"
   (( attempt++ ))
 done
@@ -75,7 +75,7 @@ done
 
 PUBLISHER_DIR=${PAPER_PUBLISHER_DIR:-"$SCRIPT_DIR/../auto-paper-md-converter-skill"}
 if [[ ! -d "$PUBLISHER_DIR" ]]; then
-  print -u2 "跳过本地静态部署：未找到发布项目 $PUBLISHER_DIR"
+  printf '%s\n' "跳过本地静态部署：未找到发布项目 $PUBLISHER_DIR" >&2
   exit 0
 fi
 
@@ -103,26 +103,26 @@ publish_lock_is_active() {
   local owner_pid
   [[ -f "$pid_file" ]] || return 1
   owner_pid=$(<"$pid_file")
-  [[ "$owner_pid" == <-> ]] || return 1
+  [[ "$owner_pid" =~ ^[0-9]+$ ]] || return 1
   kill -0 "$owner_pid" 2>/dev/null
 }
 publish_lock_age_s() {
   local now lock_mtime
   now=$(date +%s)
-  lock_mtime=$(stat -f %m "$PUBLISH_LOCK_DIR" 2>/dev/null || echo "$now")
+  lock_mtime=$(stat -c %Y "$PUBLISH_LOCK_DIR" 2>/dev/null || stat -f %m "$PUBLISH_LOCK_DIR" 2>/dev/null || echo "$now")
   echo $(( now - lock_mtime ))
 }
 while ! mkdir "$PUBLISH_LOCK_DIR" 2>/dev/null; do
   if ! publish_lock_is_active && (( $(publish_lock_age_s) >= PUBLISH_LOCK_STALE_AFTER_S )); then
-    print -u2 "清理疑似残留的发布锁：$PUBLISH_LOCK_DIR"
+    printf '%s\n' "清理疑似残留的发布锁：$PUBLISH_LOCK_DIR" >&2
     rm -rf "$PUBLISH_LOCK_DIR"
     continue
   fi
-  print -u2 "等待其他报刊发布任务完成..."
+  printf '%s\n' "等待其他报刊发布任务完成..." >&2
   sleep 10
 done
 HAVE_PUBLISH_LOCK=1
-print -r -- "$$" > "$PUBLISH_LOCK_DIR/pid"
+printf '%s\n' "$$" > "$PUBLISH_LOCK_DIR/pid"
 date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PUBLISH_LOCK_DIR/started_at"
 trap cleanup_publish_lock EXIT INT TERM
 
@@ -138,14 +138,14 @@ while true; do
       --ft-output-dir "$FT_OUTPUT_DIR" \
       --te-output-dir "$TE_OUTPUT_DIR"
   ); then
-    print -u2 "报刊本地静态部署完成"
+    printf '%s\n' "报刊本地静态部署完成" >&2
     break
   fi
   publish_status=$?
   if (( publish_attempt >= PUBLISH_MAX_ATTEMPTS )); then
     exit "$publish_status"
   fi
-  print -u2 "报刊本地静态部署失败，${PUBLISH_RETRY_DELAY_S}s 后重试 (${publish_attempt}/${PUBLISH_MAX_ATTEMPTS})"
+  printf '%s\n' "报刊本地静态部署失败，${PUBLISH_RETRY_DELAY_S}s 后重试 (${publish_attempt}/${PUBLISH_MAX_ATTEMPTS})" >&2
   sleep "$PUBLISH_RETRY_DELAY_S"
   (( publish_attempt++ ))
 done
