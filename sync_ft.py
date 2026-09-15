@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,115 @@ PRESSREADER_RESOLVED_ISSUE_RE = re.compile(
 PAPER_PUBLICATION_TYPE = "FT"
 PAPER_PUBLICATION_NAME = "Financial Times"
 BLANK_IMAGE_DESCRIPTION = " "
+FALLBACK_LLM_MODEL = "gpt-5.6-luna"
+DISALLOWED_LLM_MODELS = {"gpt-5.4-mini"}
+LLM_FATAL_STATUS_CODES = {400, 401, 403, 404, 422, 429}
+_LLM_CIRCUIT_LOCK = threading.Lock()
+_LLM_CONSECUTIVE_FAILURES = 0
+_LLM_CIRCUIT_OPEN_REASON = ""
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default)) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalise_llm_model(model: str, fallback: str = FALLBACK_LLM_MODEL) -> str:
+    value = str(model or "").strip()
+    if value.lower() in DISALLOWED_LLM_MODELS:
+        log.warning("LLM_MODEL=%s 已禁用，自动改用 %s", value, fallback)
+        return fallback
+    return value or fallback
+
+
+def _cap_llm_retries(cfg: dict[str, Any]) -> None:
+    cap = _positive_int_env("LLM_MAX_RETRIES_CAP", 1)
+    for section in ("crawl", "glossary"):
+        if section not in cfg:
+            continue
+        raw = int(cfg[section].get("max_retries", cap) or 0)
+        if raw > cap:
+            log.warning("%s.max_retries=%s 过高，按 LLM_MAX_RETRIES_CAP=%s 限制", section, raw, cap)
+            cfg[section]["max_retries"] = cap
+
+
+def _cap_llm_concurrency(cfg: dict[str, Any]) -> None:
+    pipeline = cfg.get("pipeline") or {}
+    cap = _positive_int_env("LLM_COMPILE_WORKERS_CAP", 2)
+    workers = max(1, int(pipeline.get("compile_workers", 1) or 1))
+    if workers > cap:
+        log.warning("LLM_COMPILE_WORKERS=%s 过高，按 LLM_COMPILE_WORKERS_CAP=%s 限制", workers, cap)
+        workers = cap
+        pipeline["compile_workers"] = workers
+    max_pending_cap = max(workers, workers * 2)
+    max_pending = max(1, int(pipeline.get("max_pending", max_pending_cap) or max_pending_cap))
+    if max_pending > max_pending_cap:
+        log.warning("LLM_MAX_PENDING=%s 过高，限制为 %s", max_pending, max_pending_cap)
+        pipeline["max_pending"] = max_pending_cap
+    cfg["pipeline"] = pipeline
+
+
+def _is_fatal_llm_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and status_code in LLM_FATAL_STATUS_CODES:
+        return True
+    message = str(exc).lower()
+    fatal_markers = (
+        "model_not_found",
+        "does not exist",
+        "not found",
+        "unsupported model",
+        "invalid api key",
+        "incorrect api key",
+        "permission",
+        "forbidden",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+    )
+    return any(marker in message for marker in fatal_markers)
+
+
+def _ensure_llm_circuit_closed(context: str) -> None:
+    with _LLM_CIRCUIT_LOCK:
+        if _LLM_CIRCUIT_OPEN_REASON:
+            raise RuntimeError(f"{context} 已停止：{_LLM_CIRCUIT_OPEN_REASON}")
+
+
+def _record_llm_success() -> None:
+    global _LLM_CONSECUTIVE_FAILURES
+    with _LLM_CIRCUIT_LOCK:
+        _LLM_CONSECUTIVE_FAILURES = 0
+
+
+def _record_llm_failure(exc: Exception, context: str) -> None:
+    global _LLM_CONSECUTIVE_FAILURES, _LLM_CIRCUIT_OPEN_REASON
+    with _LLM_CIRCUIT_LOCK:
+        if _LLM_CIRCUIT_OPEN_REASON:
+            return
+        if _is_fatal_llm_error(exc):
+            _LLM_CIRCUIT_OPEN_REASON = f"{context} 遇到不可恢复错误，已熔断本轮 LLM 调用：{exc}"
+            return
+        _LLM_CONSECUTIVE_FAILURES += 1
+        limit = _positive_int_env("LLM_MAX_CONSECUTIVE_FAILURES", 3)
+        if _LLM_CONSECUTIVE_FAILURES >= limit:
+            _LLM_CIRCUIT_OPEN_REASON = (
+                f"{context} 连续失败 {_LLM_CONSECUTIVE_FAILURES} 次，已熔断本轮 LLM 调用：{exc}"
+            )
+
+
+def _llm_chat_completion(client: Any, context: str, **kwargs: Any) -> Any:
+    _ensure_llm_circuit_closed(context)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        _record_llm_failure(exc, context)
+        _ensure_llm_circuit_closed(context)
+        raise
+    _record_llm_success()
+    return response
 
 
 @dataclass(frozen=True)
@@ -153,7 +263,7 @@ DEFAULTS = {
         "provider": "openai",
         "api_key": "",
         "base_url": "",
-        "model": "gpt-4o-mini",
+        "model": FALLBACK_LLM_MODEL,
         "max_tokens": 2048,
         "temperature": 0.4,
         "timeout_s": 60,
@@ -174,6 +284,7 @@ DEFAULTS = {
         "load_timeout_s": 30,
         "delay_min_s": 2,
         "delay_max_s": 5,
+        "max_retries": 1,
     },
     "glossary": {
         "enabled": True,
@@ -183,7 +294,7 @@ DEFAULTS = {
         "max_candidates": 32,
         "max_input_chars": 24000,
         "max_tokens": 5000,
-        "max_retries": 2,
+        "max_retries": 1,
     },
     "pipeline": {
         "compile_workers": 2,
@@ -280,6 +391,7 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
         "crawl.load_timeout_s": src.get("PRESSREADER_LOAD_TIMEOUT_S", "").strip(),
         "crawl.delay_min_s": src.get("CRAWL_DELAY_MIN_S", "").strip(),
         "crawl.delay_max_s": src.get("CRAWL_DELAY_MAX_S", "").strip(),
+        "crawl.max_retries": src.get("CRAWL_MAX_RETRIES", "").strip(),
         "glossary.model": (
             src.get("LLM_GLOSSARY_MODEL", "").strip()
             or src.get("OPENAI_GLOSSARY_MODEL", "").strip()
@@ -306,7 +418,7 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     # 类型转换(LLM/爬虫调优参数都是数字);非法值静默回退到 DEFAULTS
     int_fields = {
         "llm": ["max_tokens", "timeout_s"],
-        "crawl": ["load_timeout_s", "delay_min_s", "delay_max_s"],
+        "crawl": ["load_timeout_s", "delay_min_s", "delay_max_s", "max_retries"],
         "glossary": ["max_terms", "max_candidates", "max_input_chars", "max_tokens", "max_retries"],
         "pipeline": ["compile_workers", "max_pending"],
     }
@@ -322,6 +434,15 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
         cfg["llm"]["temperature"] = float(raw)
     except (ValueError, TypeError):
         cfg["llm"]["temperature"] = DEFAULTS["llm"]["temperature"]
+
+    cfg["llm"]["model"] = _normalise_llm_model(str(cfg["llm"].get("model") or ""))
+    if str(cfg["glossary"].get("model") or "").strip():
+        cfg["glossary"]["model"] = _normalise_llm_model(
+            str(cfg["glossary"]["model"]),
+            str(cfg["llm"]["model"]),
+        )
+    _cap_llm_retries(cfg)
+    _cap_llm_concurrency(cfg)
 
     raw_glossary_enabled = src.get("LLM_GLOSSARY_ENABLED", "").strip().lower()
     if raw_glossary_enabled:
@@ -2561,8 +2682,8 @@ def summarize(
 
     for attempt in range(int(cfg["crawl"].get("max_retries", 2)) + 1):
         try:
-            resp = client.chat.completions.create(
-                model=llm.get("model", "gpt-4o-mini"),
+            resp = _llm_chat_completion(client, "LLM 调用", 
+                model=llm.get("model", FALLBACK_LLM_MODEL),
                 messages=[
                     {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
@@ -3078,12 +3199,12 @@ def enrich_article_glossary(
     candidates = extract_zh_english_candidates(
         paragraphs, max_candidates=max(1, int(glossary_cfg.get("max_candidates", 32)))
     )
-    model = glossary_cfg.get("model") or cfg["llm"].get("model", "gpt-4o-mini")
+    model = glossary_cfg.get("model") or cfg["llm"].get("model", FALLBACK_LLM_MODEL)
 
     def request_terms(prompt: str, label: str) -> tuple[Any, bool]:
         for attempt in range(int(glossary_cfg["max_retries"]) + 1):
             try:
-                response = client.chat.completions.create(
+                response = _llm_chat_completion(client, "LLM 调用", 
                     model=model,
                     messages=[
                         {"role": "system", "content": "Return JSON only."},
@@ -3285,8 +3406,8 @@ def _request_article_translation(
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=llm.get("model", "gpt-4o-mini"),
+            response = _llm_chat_completion(client, "LLM 调用", 
+                model=llm.get("model", FALLBACK_LLM_MODEL),
                 messages=[
                     {
                         "role": "system",
@@ -3428,8 +3549,8 @@ def _request_article_translation_numbered(
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=llm.get("model", "gpt-4o-mini"),
+            response = _llm_chat_completion(client, "LLM 调用", 
+                model=llm.get("model", FALLBACK_LLM_MODEL),
                 messages=[
                     {
                         "role": "system",
@@ -3527,8 +3648,8 @@ def _request_article_summary(
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=llm.get("model", "gpt-4o-mini"),
+            response = _llm_chat_completion(client, "LLM 调用", 
+                model=llm.get("model", FALLBACK_LLM_MODEL),
                 messages=[
                     {
                         "role": "system",
@@ -4075,8 +4196,8 @@ Return JSON:
     max_retries = int(cfg["crawl"].get("max_retries", 2))
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=llm.get("model", "gpt-4o-mini"),
+            response = _llm_chat_completion(client, "LLM 调用", 
+                model=llm.get("model", FALLBACK_LLM_MODEL),
                 messages=[
                     {"role": "system", "content": "只返回 JSON。英文专名必须保留英文原文。"},
                     {"role": "user", "content": prompt},

@@ -34,7 +34,7 @@ while true; do
   (( attempt++ ))
 done
 
-REPAIR_AFTER_SYNC=${REPAIR_AFTER_SYNC:-1}
+REPAIR_AFTER_SYNC=${REPAIR_AFTER_SYNC:-0}
 skip_repair=0
 repair_args=()
 expect_repair_date=0
