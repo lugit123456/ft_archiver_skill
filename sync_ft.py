@@ -1185,33 +1185,51 @@ def open_browser(user_data_path: str, headless: bool):
     except ImportError as e:
         sys.exit(f"未安装 drissionpage: pip install -r requirements.txt ({e})")
 
-    opts = ChromiumOptions()
     browser_path = os.getenv("BROWSER_PATH", "").strip() or os.getenv("CHROME_PATH", "").strip()
-    if browser_path:
-        opts.set_browser_path(browser_path)
 
     # 0. 清残留进程 + lock(脚本崩过后会留下孤儿)
     _cleanup_stale_chrome_locks(user_data_path)
 
-    # 1. 寻找空闲端口并显式强绑地址，避开 split(':') 报错
-    free_port = _find_free_port()
-    opts.set_address(f"127.0.0.1:{free_port}")
+    last_error: Exception | None = None
+    for attempt in range(4):
+        opts = ChromiumOptions()
+        if browser_path:
+            opts.set_browser_path(browser_path)
 
-    # 2. 设置用户目录
-    opts.set_user_data_path(user_data_path)
-    opts.headless(bool(headless))
+        # 1. 寻找空闲端口并显式强绑地址，避开 split(':') 报错。
+        # DrissionPage 会把端口传给 Chrome；这里也显式设置本地端口和参数，
+        # 避免 Linux/headless 下偶发连到刚启动但尚未健康的调试接口。
+        free_port = _find_free_port(start=9600 + attempt * 10)
+        opts.set_address(f"127.0.0.1:{free_port}")
+        if hasattr(opts, "set_local_port"):
+            opts.set_local_port(free_port)
 
-    # 3. Mac 环境下建议加上这两个参数以增加稳定性
-    opts.set_argument('--no-sandbox')
-    opts.set_argument('--disable-gpu')
+        # 2. 设置用户目录
+        opts.set_user_data_path(user_data_path)
+        opts.headless(bool(headless))
 
-    page = ChromiumPage(opts)
-    # 强制初始化 + 等 UI 渲染;不然后续 page.get 可能 race-condition
-    # (用户报告:窗口弹出但 URL 框空)
-    page.get("about:blank")
-    time.sleep(1.5)
-    log.info(f"浏览器已就绪  url={page.url!r}")
-    return page
+        # 3. Linux cron/headless 环境下的稳定性参数
+        opts.set_argument('--no-sandbox')
+        opts.set_argument('--disable-gpu')
+        opts.set_argument('--disable-dev-shm-usage')
+        opts.set_argument('--remote-debugging-address=127.0.0.1')
+        opts.set_argument(f'--remote-debugging-port={free_port}')
+
+        try:
+            page = ChromiumPage(opts)
+            # 强制初始化 + 等 UI 渲染;不然后续 page.get 可能 race-condition
+            # (用户报告:窗口弹出但 URL 框空)
+            page.get("about:blank")
+            time.sleep(1.5)
+            log.info(f"浏览器已就绪  port={free_port} url={page.url!r}")
+            return page
+        except Exception as e:
+            last_error = e
+            log.warning(f"浏览器启动失败，清理 profile 后换端口重试 ({attempt + 1}/4): {e}")
+            _cleanup_stale_chrome_locks(user_data_path)
+            time.sleep(1 + attempt)
+
+    raise RuntimeError(f"浏览器启动失败，已重试 4 次: {last_error}")
 
 
 def _find_free_port(start: int = 9600, end: int = 59600) -> int:
